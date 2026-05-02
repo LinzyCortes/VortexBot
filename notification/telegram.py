@@ -56,22 +56,33 @@ class TelegramNotifier:
 
     # ─── BOT STATUS ─────────────────────────
 
+class TelegramNotifier:
+
     def send_bot_started(self, balance: float):
         """Notif saat bot pertama kali jalan"""
+
+        from config import cfg
+
+        if cfg.IS_OKX:
+            exchange_name = "OKX Demo" if cfg.IS_OKX_DEMO else "OKX Live"
+        else:
+            exchange_name = "Bybit Testnet" if cfg.IS_TESTNET else "Bybit Live"
+
         msg = (
-            f"🚀 <b>VΦrtex Bot STARTED!</b>\n"
+            f"🚀 <b>Vortex Bot STARTED!</b>\n"
             f"{'='*35}\n"
-            f"💰 Balance    : <b>${balance:.4f}</b>\n"
-            f"📊 Mode       : <b>{self._get_mode(balance)}</b>\n"
-            f"🔧 Exchange   : <b>Okx Demo</b>\n"
-            f"📈 Pairs      : <b>BTC/USDT, ETH/USDT</b>\n"
-            f"⏰ Killzone   : <b>London & New York</b>\n"
-            f"🎯 Min Score  : <b>11/16 confluence</b>\n"
-            f"🛡️ Max Risk   : <b>1-1.5% per trade</b>\n"
+            f"💰 Balance   : <b>${balance:.4f}</b>\n"
+            f"📊 Mode      : <b>{self._get_mode(balance)}</b>\n"
+            f"📈 Exchange  : <b>{exchange_name}</b>\n"
+            f"📊 Pairs     : <b>{', '.join(cfg.PAIRS)}</b>\n"
+            f"⏰ Killzone  : <b>London & New York</b>\n"
+            f"🎯 Min Score : <b>{cfg.MIN_CONFLUENCE_SCORE}/16 confluence</b>\n"
+            f"📉 Max Risk  : <b>1–1.5% per trade</b>\n"
             f"{'='*35}\n"
             f"🤖 Bot is now monitoring the market...\n"
-            f"📱 You'll be notified for every signal!"
+            f"You'll be notified for every signal!"
         )
+
         self.send(msg)
     
     def send_bot_stopped(self, reason: str = "Manual"):

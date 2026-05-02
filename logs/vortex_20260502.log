@@ -1,0 +1,78 @@
+2026-05-02 12:07:27 | INFO     | VortexBot | ✅ Database initialized successfully
+2026-05-02 12:07:56 | INFO     | VortexBot | 🔧 Connected to Bybit TESTNET
+2026-05-02 12:12:45 | INFO     | VortexBot | ✅ Database initialized successfully
+2026-05-02 12:12:55 | INFO     | VortexBot | 🔧 Connected to Bybit TESTNET
+2026-05-02 12:17:05 | INFO     | VortexBot | ✅ Database initialized successfully
+2026-05-02 12:17:15 | INFO     | VortexBot | 🔧 Connected to Bybit TESTNET
+2026-05-02 12:17:21 | INFO     | VortexBot | 
+=============================================
+  VΦrtex Bot v1.0
+  Institutional Grade Trading Bot
+  SMC + Fibonacci + Multi-Timeframe
+=============================================
+2026-05-02 12:17:21 | INFO     | VortexBot | 🚀 Starting VΦrtex Bot...
+2026-05-02 12:17:51 | ERROR    | VortexBot | ❌ Cannot connect to Bybit!
+2026-05-02 12:17:51 | ERROR    | VortexBot | ❌ Startup failed! Bot not running.
+2026-05-02 12:24:57 | INFO     | VortexBot | ✅ Database initialized successfully
+2026-05-02 12:25:08 | INFO     | VortexBot | 🔧 Connected to Bybit TESTNET
+2026-05-02 12:25:24 | INFO     | VortexBot | 
+=============================================
+  VΦrtex Bot v1.0
+  Institutional Grade Trading Bot
+  SMC + Fibonacci + Multi-Timeframe
+=============================================
+2026-05-02 12:25:25 | INFO     | VortexBot | 🚀 Starting VΦrtex Bot...
+2026-05-02 12:25:55 | ERROR    | VortexBot | ❌ Cannot connect to Bybit!
+2026-05-02 12:25:55 | ERROR    | VortexBot | ❌ Startup failed! Bot not running.
+2026-05-02 13:23:26 | INFO     | VortexBot | ✅ Database initialized successfully
+2026-05-02 13:23:52 | INFO     | VortexBot | 🔧 Connected to OKX DEMO
+2026-05-02 13:23:52 | INFO     | VortexBot | 
+=============================================
+  VΦrtex Bot v1.0
+  Institutional Grade Trading Bot
+  SMC + Fibonacci + Multi-Timeframe
+  Exchange: OKX Demo
+=============================================
+2026-05-02 13:23:52 | INFO     | VortexBot | 🚀 Starting VΦrtex Bot on OKX Demo...
+2026-05-02 13:24:56 | ERROR    | VortexBot | ❌ Connection check failed: okx GET https://www.okx.com/api/v5/public/time
+2026-05-02 13:24:56 | ERROR    | VortexBot | ❌ Cannot connect to OKX Demo!
+2026-05-02 13:24:56 | ERROR    | VortexBot | ❌ Startup failed!
+2026-05-02 16:38:35 | INFO     | VortexBot | ✅ Database initialized successfully
+2026-05-02 16:39:04 | INFO     | VortexBot | 🔧 Connected to OKX DEMO
+2026-05-02 16:39:04 | INFO     | VortexBot | 
+=============================================
+  VΦrtex Bot v1.0
+  Institutional Grade Trading Bot
+  SMC + Fibonacci + Multi-Timeframe
+  Exchange: OKX Demo
+=============================================
+2026-05-02 16:39:04 | INFO     | VortexBot | 🚀 Starting VΦrtex Bot on OKX Demo...
+2026-05-02 16:40:09 | ERROR    | VortexBot | ❌ OKX connection check: okx GET https://www.okx.com/api/v5/public/time
+2026-05-02 16:40:09 | ERROR    | VortexBot | ❌ Cannot connect to OKX Demo!
+2026-05-02 16:40:09 | ERROR    | VortexBot | ❌ Startup failed!
+2026-05-02 16:59:49 | INFO     | VortexBot | ✅ Database initialized successfully
+2026-05-02 17:00:16 | INFO     | VortexBot | 🔧 Connected to OKX DEMO
+2026-05-02 17:00:16 | INFO     | VortexBot | 
+=============================================
+  VΦrtex Bot v1.0
+  Institutional Grade Trading Bot
+  SMC + Fibonacci + Multi-Timeframe
+  Exchange: OKX Demo
+=============================================
+2026-05-02 17:00:16 | INFO     | VortexBot | 🚀 Starting VΦrtex Bot on OKX Demo...
+2026-05-02 17:01:21 | ERROR    | VortexBot | ❌ OKX connection check: okx GET https://www.okx.com/api/v5/public/time
+2026-05-02 17:01:21 | ERROR    | VortexBot | ❌ Cannot connect to OKX Demo!
+2026-05-02 17:01:21 | ERROR    | VortexBot | ❌ Startup failed!
+2026-05-02 17:06:52 | INFO     | VortexBot | ✅ Database initialized successfully
+2026-05-02 17:07:42 | INFO     | VortexBot | 🔧 Connected to OKX DEMO
+2026-05-02 17:07:42 | INFO     | VortexBot | 
+=============================================
+  VΦrtex Bot v1.0
+  Institutional Grade Trading Bot
+  SMC + Fibonacci + Multi-Timeframe
+  Exchange: OKX Demo
+=============================================
+2026-05-02 17:07:42 | INFO     | VortexBot | 🚀 Starting VΦrtex Bot on OKX Demo...
+2026-05-02 17:08:47 | ERROR    | VortexBot | ❌ OKX connection check: okx GET https://www.okx.com/api/v5/public/time
+2026-05-02 17:08:47 | ERROR    | VortexBot | ❌ Cannot connect to OKX Demo!
+2026-05-02 17:08:47 | ERROR    | VortexBot | ❌ Startup failed!

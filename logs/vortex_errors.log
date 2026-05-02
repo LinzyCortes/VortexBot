@@ -1,0 +1,16 @@
+2026-05-02 12:17:51 | ERROR    | VortexBot | ❌ Cannot connect to Bybit!
+2026-05-02 12:17:51 | ERROR    | VortexBot | ❌ Startup failed! Bot not running.
+2026-05-02 12:25:55 | ERROR    | VortexBot | ❌ Cannot connect to Bybit!
+2026-05-02 12:25:55 | ERROR    | VortexBot | ❌ Startup failed! Bot not running.
+2026-05-02 13:24:56 | ERROR    | VortexBot | ❌ Connection check failed: okx GET https://www.okx.com/api/v5/public/time
+2026-05-02 13:24:56 | ERROR    | VortexBot | ❌ Cannot connect to OKX Demo!
+2026-05-02 13:24:56 | ERROR    | VortexBot | ❌ Startup failed!
+2026-05-02 16:40:09 | ERROR    | VortexBot | ❌ OKX connection check: okx GET https://www.okx.com/api/v5/public/time
+2026-05-02 16:40:09 | ERROR    | VortexBot | ❌ Cannot connect to OKX Demo!
+2026-05-02 16:40:09 | ERROR    | VortexBot | ❌ Startup failed!
+2026-05-02 17:01:21 | ERROR    | VortexBot | ❌ OKX connection check: okx GET https://www.okx.com/api/v5/public/time
+2026-05-02 17:01:21 | ERROR    | VortexBot | ❌ Cannot connect to OKX Demo!
+2026-05-02 17:01:21 | ERROR    | VortexBot | ❌ Startup failed!
+2026-05-02 17:08:47 | ERROR    | VortexBot | ❌ OKX connection check: okx GET https://www.okx.com/api/v5/public/time
+2026-05-02 17:08:47 | ERROR    | VortexBot | ❌ Cannot connect to OKX Demo!
+2026-05-02 17:08:47 | ERROR    | VortexBot | ❌ Startup failed!

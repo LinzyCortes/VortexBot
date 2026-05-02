@@ -360,7 +360,7 @@ class VortexBot:
             tp3       = signal.get("tp3_price")
 
             # ── Risk check ───────────────────
-            balance  = exchange.get_balance().get("free", 0)
+            balance    = exchange.get_balance().get("free", 0)
             risk_check = risk_manager.full_risk_check(balance)
 
             if not risk_check.get("safe_to_trade"):
@@ -445,7 +445,7 @@ class VortexBot:
                 "original_qty"      : quantity,
             }
 
-            # ── Auto journal ─────────────────
+            # ── Auto journal + Kirim ke Telegram ──
             entry_reason = journal.generate_entry_reason({
                 **signal,
                 "entry_price"    : entry,
@@ -458,7 +458,16 @@ class VortexBot:
                     "score_breakdown", {}
                 ),
             })
+
+            # Simpan ke file (kalau bisa)
             journal.save_trade_journal(trade_id, entry_reason)
+
+            # Kirim jurnal entry ke Telegram ← BARU!
+            journal.send_entry_journal_to_telegram(
+                trade_id, signal, entry_reason
+            )
+
+            # Kirim notif trade opened
             telegram.send_trade_opened({
                 **trade_data,
                 "confluence_score": signal.get(
@@ -602,8 +611,8 @@ class VortexBot:
             if not trail.get("active"):
                 return
 
-            new_sl  = trail.get("new_sl")
-            old_sl  = trade.get("sl_price")
+            new_sl   = trail.get("new_sl")
+            old_sl   = trade.get("sl_price")
             improved = (
                 (direction == "BUY"  and new_sl > old_sl) or
                 (direction == "SELL" and new_sl < old_sl)
@@ -641,9 +650,9 @@ class VortexBot:
                 (datetime.now() - open_time).seconds / 60
             ) if isinstance(open_time, datetime) else 0
 
-            sl       = trade.get("sl_price", entry)
-            risk     = abs(entry - sl)
-            rr       = (
+            sl    = trade.get("sl_price", entry)
+            risk  = abs(entry - sl)
+            rr    = (
                 abs(close_price - entry) / risk
                 if risk > 0 else 0
             )
@@ -665,6 +674,7 @@ class VortexBot:
             }
             db.close_trade(trade_id, close_data)
 
+            # ── Auto journal close + Kirim ke Telegram ──
             close_text = journal.generate_close_reason(
                 trade, close_data
             )
@@ -672,6 +682,11 @@ class VortexBot:
                 trade_id,
                 "→ See entry journal",
                 close_text
+            )
+
+            # Kirim close journal ke Telegram ← BARU!
+            journal.send_close_journal_to_telegram(
+                trade_id, close_text, pnl
             )
 
             risk_manager.record_trade_result(pnl > 0)
@@ -741,6 +756,7 @@ class VortexBot:
             telegram.send_morning_briefing(
                 balance, upcoming, regime
             )
+            logger.info("☀️ Morning briefing sent!")
         except Exception as e:
             logger.error(f"❌ Morning briefing error: {e}")
 
@@ -770,6 +786,7 @@ class VortexBot:
                 "balance"     : balance,
             })
             journal.generate_monthly_report()
+            logger.info("📊 Daily summary sent!")
         except Exception as e:
             logger.error(f"❌ Daily summary error: {e}")
 
@@ -783,6 +800,9 @@ class VortexBot:
             telegram.send_health_check(
                 uptime, balance, len(self.open_trades)
             )
+            logger.info(
+                f"💚 Health check: {uptime:.1f}h"
+            )
         except Exception as e:
             logger.error(f"❌ Health check error: {e}")
 
@@ -793,17 +813,20 @@ class VortexBot:
                 "free", 0
             )
             telegram.send_weekly_summary(stats)
+            logger.info("📈 Weekly summary sent!")
         except Exception as e:
             logger.error(f"❌ Weekly summary error: {e}")
 
     def _run_weekly_evaluation(self):
         try:
+            logger.info("🧠 Running weekly evaluation...")
             report  = evaluator.run_weekly_evaluation()
             summary = "\n".join(report.split("\n")[:25])
             telegram.send(
                 f"🧠 <b>WEEKLY EVALUATION</b>\n"
                 f"<pre>{summary[:3500]}</pre>"
             )
+            logger.info("✅ Weekly evaluation sent!")
         except Exception as e:
             logger.error(f"❌ Weekly eval error: {e}")
 
@@ -820,6 +843,7 @@ class VortexBot:
                     f"📋 <b>LONDON SESSION DONE</b>\n"
                     f"<pre>{summary[:3500]}</pre>"
                 )
+            logger.info("📋 London summary sent!")
         except Exception as e:
             logger.error(f"❌ London summary error: {e}")
 
@@ -836,6 +860,7 @@ class VortexBot:
                     f"📋 <b>NY SESSION DONE</b>\n"
                     f"<pre>{summary[:3500]}</pre>"
                 )
+            logger.info("📋 NY summary sent!")
         except Exception as e:
             logger.error(f"❌ NY summary error: {e}")
 
@@ -846,6 +871,9 @@ class VortexBot:
                 "balance": balance,
                 "date"   : datetime.now().isoformat(),
             })
+            logger.info(
+                f"📅 Weekly reset: ${balance:.4f}"
+            )
         except Exception as e:
             logger.error(f"❌ Weekly reset error: {e}")
 
@@ -857,6 +885,9 @@ class VortexBot:
                     "balance": balance,
                     "date"   : datetime.now().isoformat(),
                 })
+                logger.info(
+                    f"📅 Monthly reset: ${balance:.4f}"
+                )
         except Exception as e:
             logger.error(f"❌ Monthly reset error: {e}")
 

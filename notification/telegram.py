@@ -56,8 +56,6 @@ class TelegramNotifier:
 
     # ─── BOT STATUS ─────────────────────────
 
-class TelegramNotifier:
-
     def send_bot_started(self, balance: float):
         """Notif saat bot pertama kali jalan"""
 

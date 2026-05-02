@@ -1,0 +1,14 @@
+ccxt
+pandas
+numpy
+ta
+scipy
+python-telegram-bot==20.7
+schedule
+requests
+beautifulsoup4
+sqlalchemy
+backtesting
+matplotlib
+plotly
+python-dotenv

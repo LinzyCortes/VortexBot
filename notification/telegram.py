@@ -57,7 +57,7 @@ class TelegramNotifier:
     # ─── BOT STATUS ─────────────────────────
 
     def send_bot_started(self, balance: float):
-    """Notif saat bot pertama kali jalan"""
+     """Notif saat bot pertama kali jalan"""
     # Import config untuk detect exchange
     from config import cfg
 

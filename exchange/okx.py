@@ -21,19 +21,23 @@ class OKXExchange:
     def _connect(self):
         """Koneksi ke OKX Paper Trading atau Live"""
         try:
+            # Demo mode pakai "future", live pakai "swap"
+            # OKX Demo tidak support OHLCV via defaultType "swap"
+            default_type = "future" if cfg.IS_OKX_DEMO else "swap"
+
             params = {
                 "apiKey"  : cfg.OKX_API_KEY,
                 "secret"  : cfg.OKX_API_SECRET,
                 "password": cfg.OKX_PASSPHRASE,
                 "options" : {
-                    "defaultType": "swap",
+                    "defaultType": default_type,
                     "broker"     : "",
                 },
                 "enableRateLimit": True,
                 "timeout"        : 30000,
             }
 
-            # Paper trading → tambah header x-simulated-trading
+            # Demo mode → tambah header x-simulated-trading
             if cfg.IS_OKX_DEMO:
                 params["headers"] = {"x-simulated-trading": "1"}
 

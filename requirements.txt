@@ -12,3 +12,4 @@ backtesting
 matplotlib
 plotly
 python-dotenv
+psycopg2-binary

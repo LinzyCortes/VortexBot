@@ -1,5 +1,5 @@
 # ============================================
-# VORTEX BOT - NEWS FILTER
+# VORTEX BOT - NEWS & SESSION FILTER
 # ============================================
 
 import requests
@@ -9,94 +9,108 @@ from logger import logger
 
 class NewsFilter:
     def __init__(self):
-        self.url = (
-            "https://nfs.faireconomy.media"
-            "/ff_calendar_thisweek.json"
-        )
-        self.cache         = []
-        self.cache_time    = None
-        self.cache_expiry  = 3600  # 1 jam
-
-        # Keyword high impact news
-        self.high_impact_keywords = [
-            "NFP", "Non-Farm", "CPI", "Inflation",
-            "FOMC", "Fed", "Interest Rate", "GDP",
-            "Unemployment", "Retail Sales", "PPI",
-            "Powell", "ECB", "BOE", "BOJ",
+        self.urls = [
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
         ]
-
-    # ─── FETCH NEWS ─────────────────────────
+        self.cache        = []
+        self.cache_time   = None
+        self.cache_expiry = 3600  # 1 jam
+        self.fetch_failed = False
+        self.fail_count   = 0
+        self.max_fails    = 3
 
     def _fetch_news(self) -> list:
-        """Fetch news dari Forex Factory"""
+        """Fetch news dengan multiple URL fallback"""
         try:
             # Pakai cache kalau masih valid
             if (self.cache and self.cache_time and
-                    (datetime.now() - self.cache_time).seconds
-                    < self.cache_expiry):
+                    (datetime.now() -
+                     self.cache_time).seconds < self.cache_expiry):
                 return self.cache
 
-            response = requests.get(
-                self.url, timeout=10
-            )
-            if response.status_code == 200:
-                self.cache      = response.json()
-                self.cache_time = datetime.now()
+            # Kalau sudah terlalu banyak gagal →
+            # return cache lama atau empty
+            if self.fail_count >= self.max_fails:
                 logger.debug(
-                    f"📰 News fetched: {len(self.cache)} events"
+                    "📰 News fetch skipped (too many fails) "
+                    "→ assuming safe to trade"
                 )
-                return self.cache
-            return []
+                return self.cache or []
+
+            # Coba semua URL
+            for url in self.urls:
+                try:
+                    resp = requests.get(url, timeout=8)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if isinstance(data, list):
+                            self.cache      = data
+                            self.cache_time = datetime.now()
+                            self.fail_count = 0
+                            logger.debug(
+                                f"📰 News fetched: "
+                                f"{len(data)} events"
+                            )
+                            return self.cache
+                except Exception:
+                    continue
+
+            # Semua URL gagal
+            self.fail_count += 1
+            logger.warning(
+                f"⚠️ News fetch failed "
+                f"({self.fail_count}/{self.max_fails})"
+            )
+            return self.cache or []
 
         except Exception as e:
-            logger.warning(f"⚠️ News fetch failed: {e}")
-            return []
-
-    # ─── CHECK NEWS ─────────────────────────
+            logger.warning(f"⚠️ News error: {e}")
+            return self.cache or []
 
     def is_safe_to_trade(self,
                          minutes_before: int = 30,
-                         minutes_after:  int = 30) -> dict:
-        """
-        Cek apakah aman untuk trading sekarang.
-        Returns dict dengan status dan info news.
-        """
+                         minutes_after : int = 30) -> dict:
+        """Cek apakah aman trading"""
         try:
-            news_list = self._fetch_news()
-            now       = datetime.utcnow()
-
+            news_list   = self._fetch_news()
+            now         = datetime.utcnow()
             unsafe_news = []
 
             for news in news_list:
-                # Skip jika bukan high impact
-                impact = news.get("impact", "").lower()
+                impact = str(
+                    news.get("impact", "")
+                ).lower()
                 if impact != "high":
                     continue
 
-                # Parse waktu news
-                news_time_str = news.get("date", "")
-                if not news_time_str:
+                time_str = news.get("date", "")
+                if not time_str:
                     continue
 
                 try:
                     news_time = datetime.strptime(
-                        news_time_str, "%Y-%m-%dT%H:%M:%S%z"
+                        time_str, "%Y-%m-%dT%H:%M:%S%z"
                     ).replace(tzinfo=None)
-                except:
-                    continue
+                except Exception:
+                    try:
+                        news_time = datetime.strptime(
+                            time_str, "%Y-%m-%dT%H:%M:%S"
+                        )
+                    except Exception:
+                        continue
 
-                # Cek window waktu
                 window_start = news_time - timedelta(
                     minutes=minutes_before
                 )
-                window_end   = news_time + timedelta(
+                window_end = news_time + timedelta(
                     minutes=minutes_after
                 )
 
                 if window_start <= now <= window_end:
                     unsafe_news.append({
                         "title"  : news.get("title", ""),
-                        "time"   : news_time_str,
+                        "time"   : time_str,
                         "impact" : impact,
                         "country": news.get("country", ""),
                     })
@@ -105,165 +119,172 @@ class NewsFilter:
 
             if not is_safe:
                 logger.warning(
-                    f"⚠️ NEWS FILTER: {len(unsafe_news)} "
-                    f"high impact news detected! Skip trading."
+                    f"⚠️ NEWS FILTER: "
+                    f"{len(unsafe_news)} high impact events!"
                 )
-                for n in unsafe_news:
-                    logger.warning(
-                        f"   📰 {n['title']} @ {n['time']}"
-                    )
 
             return {
-                "is_safe"     : is_safe,
-                "unsafe_news" : unsafe_news,
-                "checked_at"  : now.isoformat(),
+                "is_safe"    : is_safe,
+                "unsafe_news": unsafe_news,
+                "checked_at" : now.isoformat(),
             }
 
         except Exception as e:
             logger.error(f"❌ News check error: {e}")
-            # Default aman jika error fetch
+            # Default AMAN kalau error
             return {"is_safe": True, "unsafe_news": []}
 
     def get_upcoming_news(self,
-                          hours_ahead: int = 4) -> list:
-        """Ambil news yang akan datang dalam X jam"""
+                          hours_ahead: int = 12) -> list:
+        """Ambil news upcoming"""
         try:
             news_list = self._fetch_news()
             now       = datetime.utcnow()
             upcoming  = []
 
             for news in news_list:
-                impact = news.get("impact", "").lower()
+                impact = str(
+                    news.get("impact", "")
+                ).lower()
                 if impact != "high":
                     continue
 
-                news_time_str = news.get("date", "")
-                if not news_time_str:
+                time_str = news.get("date", "")
+                if not time_str:
                     continue
 
                 try:
                     news_time = datetime.strptime(
-                        news_time_str, "%Y-%m-%dT%H:%M:%S%z"
+                        time_str, "%Y-%m-%dT%H:%M:%S%z"
                     ).replace(tzinfo=None)
-                except:
-                    continue
+                except Exception:
+                    try:
+                        news_time = datetime.strptime(
+                            time_str, "%Y-%m-%dT%H:%M:%S"
+                        )
+                    except Exception:
+                        continue
 
-                # Cek apakah dalam X jam ke depan
                 if now <= news_time <= now + timedelta(
                     hours=hours_ahead
                 ):
+                    mins_away = int(
+                        (news_time - now).total_seconds() / 60
+                    )
                     upcoming.append({
                         "title"      : news.get("title", ""),
-                        "time"       : news_time_str,
+                        "time"       : time_str,
                         "country"    : news.get("country", ""),
-                        "minutes_away": int(
-                            (news_time - now).seconds / 60
-                        ),
+                        "minutes_away": mins_away,
                     })
 
-            return upcoming
+            return sorted(
+                upcoming, key=lambda x: x["minutes_away"]
+            )
 
         except Exception as e:
             logger.error(f"❌ Upcoming news error: {e}")
             return []
 
 
-# ============================================
-# VORTEX BOT - SESSION / KILLZONE FILTER
-# ============================================
-
 class SessionFilter:
     def __init__(self):
-        # Killzone dalam jam WIB (UTC+7)
         self.sessions = {
             "london": {
-                "open" : (14, 0),   # 14:00 WIB
-                "close": (17, 0),   # 17:00 WIB
-                "name" : "London Killzone"
+                "open" : (14, 0),
+                "close": (17, 0),
+                "name" : "London Killzone",
             },
             "new_york": {
-                "open" : (19, 30),  # 19:30 WIB
-                "close": (23, 0),   # 23:00 WIB
-                "name" : "New York Killzone"
-            }
+                "open" : (19, 30),
+                "close": (23, 0),
+                "name" : "New York Killzone",
+            },
         }
-
-        # Waktu yang dihindari
         self.avoid_times = [
-            # Monday open (market gap)
-            {"day": 0, "start": (0, 0),  "end": (2, 0),
-             "reason": "Monday Open - market gap risk"},
-            # Friday close
-            {"day": 4, "start": (22, 0), "end": (23, 59),
-             "reason": "Friday Close - low volume"},
+            {
+                "day"   : 0,
+                "start" : (0, 0),
+                "end"   : (2, 0),
+                "reason": "Monday Open — gap risk",
+            },
+            {
+                "day"   : 4,
+                "start" : (22, 0),
+                "end"   : (23, 59),
+                "reason": "Friday Close — low volume",
+            },
         ]
 
+    def _now_wib(self):
+        """Waktu sekarang dalam WIB"""
+        now      = datetime.utcnow()
+        hour_wib = (now.hour + 7) % 24
+        return now, hour_wib, now.minute, now.weekday()
+
     def is_killzone(self) -> dict:
-        """Cek apakah sekarang dalam killzone"""
-        # WIB = UTC + 7
-        now_wib  = datetime.utcnow()
-        now_hour = (now_wib.hour + 7) % 24
-        now_min  = now_wib.minute
-        now_time = now_hour * 60 + now_min  # dalam menit
+        """Cek killzone"""
+        _, hour_wib, minute, _ = self._now_wib()
+        now_min = hour_wib * 60 + minute
 
-        for session_name, session in self.sessions.items():
-            open_time  = (session["open"][0]  * 60 +
-                          session["open"][1])
-            close_time = (session["close"][0] * 60 +
-                          session["close"][1])
+        for key, session in self.sessions.items():
+            open_min  = session["open"][0]  * 60 + \
+                        session["open"][1]
+            close_min = session["close"][0] * 60 + \
+                        session["close"][1]
 
-            if open_time <= now_time <= close_time:
-                minutes_left = close_time - now_time
+            if open_min <= now_min <= close_min:
                 return {
-                    "in_killzone"  : True,
-                    "session"      : session["name"],
-                    "session_key"  : session_name,
-                    "minutes_left" : minutes_left,
+                    "in_killzone" : True,
+                    "session"     : session["name"],
+                    "session_key" : key,
+                    "minutes_left": close_min - now_min,
                 }
 
-        # Hitung next killzone
-        next_session = self._get_next_session(now_time)
+        next_s = self._get_next_session(now_min)
         return {
             "in_killzone" : False,
             "session"     : None,
-            "next_session": next_session,
+            "next_session": next_s,
         }
 
-    def _get_next_session(self, current_minutes: int) -> dict:
+    def _get_next_session(self,
+                          current_min: int) -> dict:
         """Hitung sesi berikutnya"""
-        sessions_today = []
+        candidates = []
         for key, session in self.sessions.items():
-            open_time = (session["open"][0]  * 60 +
-                         session["open"][1])
-            if open_time > current_minutes:
-                sessions_today.append({
-                    "name"           : session["name"],
-                    "minutes_away"   : open_time - current_minutes,
+            open_min = session["open"][0] * 60 + \
+                       session["open"][1]
+            if open_min > current_min:
+                candidates.append({
+                    "name"       : session["name"],
+                    "minutes_away": open_min - current_min,
                 })
-
-        if sessions_today:
-            return min(sessions_today,
-                       key=lambda x: x["minutes_away"])
-        return {"name": "London (besok)", "minutes_away": 0}
+        if candidates:
+            return min(
+                candidates, key=lambda x: x["minutes_away"]
+            )
+        # Besok London
+        london_open = (
+            self.sessions["london"]["open"][0] * 60 +
+            self.sessions["london"]["open"][1]
+        )
+        return {
+            "name"        : "London Killzone (besok)",
+            "minutes_away": (24*60 - current_min) + london_open,
+        }
 
     def is_avoid_time(self) -> dict:
-        """Cek apakah sekarang waktu yang dihindari"""
-        now_wib  = datetime.utcnow()
-        now_hour = (now_wib.hour + 7) % 24
-        now_min  = now_wib.minute
-        now_day  = now_wib.weekday()  # 0=Monday, 6=Sunday
-        now_time = now_hour * 60 + now_min
+        """Cek waktu yang dihindari"""
+        _, hour_wib, minute, weekday = self._now_wib()
+        now_min = hour_wib * 60 + minute
 
         for avoid in self.avoid_times:
-            if avoid["day"] != now_day:
+            if avoid["day"] != weekday:
                 continue
-
-            start = (avoid["start"][0] * 60 +
-                     avoid["start"][1])
-            end   = (avoid["end"][0]   * 60 +
-                     avoid["end"][1])
-
-            if start <= now_time <= end:
+            start = avoid["start"][0]*60 + avoid["start"][1]
+            end   = avoid["end"][0]  *60 + avoid["end"][1]
+            if start <= now_min <= end:
                 return {
                     "should_avoid": True,
                     "reason"      : avoid["reason"],
@@ -273,33 +294,31 @@ class SessionFilter:
 
     def get_session_info(self) -> dict:
         """Info lengkap sesi sekarang"""
-        now_wib  = datetime.utcnow()
-        now_hour = (now_wib.hour + 7) % 24
+        _, hour_wib, minute, _ = self._now_wib()
 
-        # Tentukan sesi aktif
-        if 0 <= now_hour < 7:
-            active_session = "Asia Session (Low Volume)"
-        elif 7 <= now_hour < 14:
-            active_session = "Pre-London (Preparation)"
-        elif 14 <= now_hour < 17:
-            active_session = "London Killzone ⚡"
-        elif 17 <= now_hour < 19:
-            active_session = "London-NY Overlap"
-        elif 19 <= now_hour < 23:
-            active_session = "New York Killzone ⚡"
+        if 0 <= hour_wib < 7:
+            active = "Asia Session (Low Volume)"
+        elif 7 <= hour_wib < 14:
+            active = "Pre-London (Preparation)"
+        elif 14 <= hour_wib < 17:
+            active = "London Killzone ⚡"
+        elif 17 <= hour_wib < 19:
+            active = "London-NY Overlap"
+        elif 19 <= hour_wib < 23:
+            active = "New York Killzone ⚡"
         else:
-            active_session = "Late NY / Pre-Asia"
+            active = "Late NY / Pre-Asia"
 
         killzone = self.is_killzone()
         avoid    = self.is_avoid_time()
 
         return {
-            "active_session" : active_session,
-            "in_killzone"    : killzone["in_killzone"],
-            "session_name"   : killzone.get("session"),
-            "should_avoid"   : avoid["should_avoid"],
-            "avoid_reason"   : avoid.get("reason"),
-            "wib_time"       : f"{now_hour:02d}:{now_wib.minute:02d}",
+            "active_session": active,
+            "in_killzone"   : killzone["in_killzone"],
+            "session_name"  : killzone.get("session"),
+            "should_avoid"  : avoid["should_avoid"],
+            "avoid_reason"  : avoid.get("reason"),
+            "wib_time"      : f"{hour_wib:02d}:{minute:02d}",
         }
 
 

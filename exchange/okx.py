@@ -3,6 +3,7 @@
 # ============================================
 
 import ccxt
+import requests as req
 from config import cfg
 from logger import logger
 
@@ -10,78 +11,176 @@ from logger import logger
 class OKXExchange:
 
     def __init__(self):
-        # Virtual balance untuk demo mode
         self._virtual_balance = float(cfg.CAPITAL)
         self._virtual_used    = 0.0
         self.exchange         = self._connect()
         self.name             = "OKX"
 
-    # ─── CONNECTION ──────────────────────────────────────────────────────────
+    # ─── CONNECTION ─────────────────────────
 
     def _connect(self):
-        """Koneksi ke OKX Paper Trading atau Live"""
+        """Koneksi ke OKX Demo atau Live"""
         try:
-            # Demo mode pakai "future", live pakai "swap"
-            # OKX Demo tidak support OHLCV via defaultType "swap"
-            default_type = "future" if cfg.IS_OKX_DEMO else "swap"
-
             params = {
                 "apiKey"  : cfg.OKX_API_KEY,
                 "secret"  : cfg.OKX_API_SECRET,
                 "password": cfg.OKX_PASSPHRASE,
                 "options" : {
-                    "defaultType": default_type,
+                    "defaultType": "swap",
                     "broker"     : "",
                 },
                 "enableRateLimit": True,
                 "timeout"        : 30000,
             }
 
-            # Demo mode → tambah header x-simulated-trading
             if cfg.IS_OKX_DEMO:
-                params["headers"] = {"x-simulated-trading": "1"}
-
-            exchange = ccxt.okx(params)
-
-            if cfg.IS_OKX_DEMO:
-                logger.info("🔧 Connected to OKX PAPER TRADING (Swap/Leverage enabled)")
+                params["headers"] = {
+                    "x-simulated-trading": "1"
+                }
+                logger.info("🔧 Connected to OKX DEMO")
             else:
                 logger.info("🚀 Connected to OKX LIVE")
 
-            return exchange
+            return ccxt.okx(params)
 
         except Exception as e:
             logger.error(f"❌ OKX connection failed: {e}")
             raise
 
     def is_connected(self) -> bool:
-        """Cek koneksi OKX"""
+        """Cek koneksi OKX via public endpoint"""
         try:
-            self.exchange.fetch_time()
-            logger.info("✅ OKX connection OK!")
-            return True
+            # Pakai public endpoint — tidak kena demo limit
+            resp = req.get(
+                "https://www.okx.com/api/v5/public/time",
+                timeout=10
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == "0":
+                    logger.info("✅ OKX connection OK!")
+                    return True
+            logger.error("❌ OKX public endpoint error")
+            return False
         except Exception as e:
             logger.error(f"❌ OKX connection check: {e}")
             return False
 
-    # ─── MARKET DATA ─────────────────────────────────────────────────────────
+    # ─── MARKET DATA (Public API) ────────────
 
-    def get_ohlcv(self, pair: str, timeframe: str, limit: int = 200) -> list:
-        """Ambil data OHLCV"""
+    def get_ohlcv(self, pair    : str,
+                  timeframe: str,
+                  limit    : int = 200) -> list:
+        """
+        Ambil OHLCV via OKX Public API.
+        Tidak butuh auth → tidak kena demo limit!
+        """
         try:
-            ohlcv = self.exchange.fetch_ohlcv(pair, timeframe, limit=limit)
-            logger.debug(
-                f"📊 OHLCV: {pair} {timeframe} "
-                f"({len(ohlcv)} candles)"
+            # Konversi timeframe ke format OKX
+            tf_map = {
+                "1m" : "1m",  "3m" : "3m",
+                "5m" : "5m",  "15m": "15m",
+                "30m": "30m", "1h" : "1H",
+                "1H" : "1H",  "2H" : "2H",
+                "4h" : "4H",  "4H" : "4H",
+                "6H" : "6H",  "12H": "12H",
+                "1d" : "1D",  "1D" : "1D",
+            }
+            bar = tf_map.get(timeframe, timeframe.upper())
+
+            # Konversi pair format kalau perlu
+            # BTC/USDT → BTC-USDT-SWAP
+            # BTC-USDT-SWAP → BTC-USDT-SWAP (sudah benar)
+            inst_id = pair
+            if "/" in pair:
+                base, quote = pair.split("/")
+                inst_id = f"{base}-{quote}-SWAP"
+
+            resp = req.get(
+                "https://www.okx.com/api/v5/market/candles",
+                params={
+                    "instId": inst_id,
+                    "bar"   : bar,
+                    "limit" : str(min(limit, 300)),
+                },
+                timeout=15,
             )
-            return ohlcv
+
+            if resp.status_code != 200:
+                logger.error(
+                    f"❌ OHLCV HTTP {resp.status_code}: "
+                    f"{pair} {timeframe}"
+                )
+                return []
+
+            data = resp.json()
+            if data.get("code") != "0":
+                logger.error(
+                    f"❌ OHLCV API error: "
+                    f"{data.get('msg')} | {pair}"
+                )
+                return []
+
+            candles = data.get("data", [])
+            if not candles:
+                logger.warning(
+                    f"⚠️ No candle data: {pair} {timeframe}"
+                )
+                return []
+
+            # OKX format: [ts, o, h, l, c, vol, volCcy, ...]
+            # ccxt format: [ts, o, h, l, c, vol]
+            result = []
+            for c in reversed(candles):
+                result.append([
+                    int(c[0]),    # timestamp ms
+                    float(c[1]),  # open
+                    float(c[2]),  # high
+                    float(c[3]),  # low
+                    float(c[4]),  # close
+                    float(c[5]),  # volume
+                ])
+
+            logger.debug(
+                f"📊 OHLCV: {inst_id} {bar} "
+                f"({len(result)} candles)"
+            )
+            return result
+
         except Exception as e:
-            logger.error(f"❌ OHLCV error {pair} {timeframe}: {e}")
+            logger.error(
+                f"❌ OHLCV error {pair} {timeframe}: {e}"
+            )
             return []
 
     def get_ticker(self, pair: str) -> dict:
-        """Ambil harga terkini"""
+        """Ambil harga terkini via Public API"""
         try:
+            inst_id = pair
+            if "/" in pair:
+                base, quote = pair.split("/")
+                inst_id = f"{base}-{quote}-SWAP"
+
+            resp = req.get(
+                "https://www.okx.com/api/v5/market/ticker",
+                params={"instId": inst_id},
+                timeout=10,
+            )
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == "0" and data.get("data"):
+                    t = data["data"][0]
+                    return {
+                        "pair"  : pair,
+                        "bid"   : float(t.get("bidPx",  0) or 0),
+                        "ask"   : float(t.get("askPx",  0) or 0),
+                        "last"  : float(t.get("last",   0) or 0),
+                        "volume": float(t.get("vol24h", 0) or 0),
+                        "change": float(t.get("sodUtc8",0) or 0),
+                    }
+
+            # Fallback ke ccxt
             ticker = self.exchange.fetch_ticker(pair)
             return {
                 "pair"  : pair,
@@ -91,88 +190,106 @@ class OKXExchange:
                 "volume": float(ticker.get("quoteVolume", 0) or 0),
                 "change": float(ticker.get("percentage",  0) or 0),
             }
+
         except Exception as e:
             logger.error(f"❌ Ticker error {pair}: {e}")
             return {}
 
-    def get_orderbook(self, pair: str, limit: int = 20) -> dict:
+    def get_orderbook(self, pair : str,
+                      limit: int = 20) -> dict:
         """Ambil order book"""
         try:
-            ob = self.exchange.fetch_order_book(pair, limit)
-            return {
-                "bids": ob.get("bids", []),
-                "asks": ob.get("asks", []),
-            }
+            inst_id = pair
+            if "/" in pair:
+                base, quote = pair.split("/")
+                inst_id = f"{base}-{quote}-SWAP"
+
+            resp = req.get(
+                "https://www.okx.com/api/v5/market/books",
+                params={"instId": inst_id, "sz": str(limit)},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == "0" and data.get("data"):
+                    ob = data["data"][0]
+                    return {
+                        "bids": [
+                            [float(b[0]), float(b[1])]
+                            for b in ob.get("bids", [])
+                        ],
+                        "asks": [
+                            [float(a[0]), float(a[1])]
+                            for a in ob.get("asks", [])
+                        ],
+                    }
+            return {}
         except Exception as e:
             logger.error(f"❌ Orderbook error {pair}: {e}")
             return {}
 
-    # ─── ACCOUNT ─────────────────────────────────────────────────────────────
+    # ─── ACCOUNT ────────────────────────────
 
     def get_balance(self) -> dict:
         """
-        Ambil saldo akun USDT.
-        OKX Paper Trading tidak support fetch balance via API,
-        jadi pakai virtual balance dari CAPITAL config.
+        Ambil saldo.
+        Demo → virtual balance (OKX Demo tidak support API)
+        Live → fetch dari exchange
         """
-        # Paper trading → pakai virtual balance
         if cfg.IS_OKX_DEMO:
-            free   = max(0.0, self._virtual_balance - self._virtual_used)
+            free   = max(
+                0.0, self._virtual_balance - self._virtual_used
+            )
             result = {
                 "total": self._virtual_balance,
                 "free" : free,
                 "used" : self._virtual_used,
             }
             logger.debug(
-                f"💰 Virtual balance: "
-                f"total=${self._virtual_balance:.4f} "
-                f"free=${free:.4f} "
-                f"used=${self._virtual_used:.4f}"
+                f"💰 Virtual: total=${self._virtual_balance:.4f} "
+                f"free=${free:.4f} used=${self._virtual_used:.4f}"
             )
             return result
 
-        # Live mode → fetch dari exchange
         try:
             balance = self.exchange.fetch_balance()
             usdt    = balance.get("USDT", {})
-            result  = {
+            return {
                 "total": float(usdt.get("total", 0) or 0),
                 "free" : float(usdt.get("free",  0) or 0),
                 "used" : float(usdt.get("used",  0) or 0),
             }
-            logger.debug(f"💰 Balance: {result}")
-            return result
         except Exception as e:
             logger.error(f"❌ Balance error: {e}")
             return {"total": 0, "free": 0, "used": 0}
 
     def update_virtual_balance(self, pnl: float):
-        """Update virtual balance setelah trade close."""
+        """Update virtual balance setelah trade (compound!)"""
         if cfg.IS_OKX_DEMO:
-            self._virtual_balance  = max(0.0, self._virtual_balance + pnl)
+            old = self._virtual_balance
+            self._virtual_balance = max(
+                0.0, self._virtual_balance + pnl
+            )
+            sign = "+" if pnl >= 0 else ""
             logger.info(
-                f"💰 Virtual balance updated: "
+                f"💰 Compound: ${old:.4f} → "
                 f"${self._virtual_balance:.4f} "
-                f"({'+'if pnl >= 0 else ''}{pnl:.4f})"
+                f"({sign}{pnl:.4f})"
             )
 
     def reserve_balance(self, amount: float):
         """Reserve balance saat open trade"""
         if cfg.IS_OKX_DEMO:
             self._virtual_used += amount
-            logger.debug(
-                f"💰 Reserved: ${amount:.4f} | "
-                f"Used: ${self._virtual_used:.4f}"
-            )
+            logger.debug(f"💰 Reserved: ${amount:.4f}")
 
     def release_balance(self, amount: float):
         """Release balance saat close trade"""
         if cfg.IS_OKX_DEMO:
-            self._virtual_used = max(0.0, self._virtual_used - amount)
-            logger.debug(
-                f"💰 Released: ${amount:.4f} | "
-                f"Used: ${self._virtual_used:.4f}"
+            self._virtual_used = max(
+                0.0, self._virtual_used - amount
             )
+            logger.debug(f"💰 Released: ${amount:.4f}")
 
     def get_positions(self) -> list:
         """Ambil posisi terbuka"""
@@ -186,10 +303,11 @@ class OKXExchange:
             logger.error(f"❌ Positions error: {e}")
             return []
 
-    # ─── LEVERAGE ────────────────────────────────────────────────────────────
+    # ─── LEVERAGE ───────────────────────────
 
-    def set_leverage(self, pair: str, leverage: int) -> bool:
-        """Set leverage untuk pair"""
+    def set_leverage(self, pair    : str,
+                     leverage: int) -> bool:
+        """Set leverage"""
         try:
             leverage = max(1, min(leverage, cfg.MAX_LEVERAGE))
             self.exchange.set_leverage(
@@ -200,10 +318,18 @@ class OKXExchange:
             return True
         except Exception as e:
             logger.error(f"❌ Leverage error {pair}: {e}")
+            if cfg.IS_OKX_DEMO:
+                logger.info(
+                    f"📝 Demo leverage noted: {leverage}x"
+                )
+                return True
             return False
 
-    def calculate_leverage(self, balance: float, entry: float,
-                           sl: float, risk_pct: float) -> int:
+    def calculate_leverage(self,
+                           balance : float,
+                           entry   : float,
+                           sl      : float,
+                           risk_pct: float) -> int:
         """Hitung leverage optimal"""
         try:
             risk_amount = balance * (risk_pct / 100)
@@ -218,10 +344,13 @@ class OKXExchange:
             logger.error(f"❌ Leverage calc error: {e}")
             return 1
 
-    # ─── POSITION SIZING ─────────────────────────────────────────────────────
+    # ─── POSITION SIZING ────────────────────
 
-    def calculate_position_size(self, balance: float, entry: float,
-                                sl: float, risk_pct: float,
+    def calculate_position_size(self,
+                                balance : float,
+                                entry   : float,
+                                sl      : float,
+                                risk_pct: float,
                                 leverage: int) -> float:
         """Hitung ukuran posisi"""
         try:
@@ -238,9 +367,10 @@ class OKXExchange:
             logger.error(f"❌ Position size error: {e}")
             return 0
 
-    # ─── ORDERS ──────────────────────────────────────────────────────────────
+    # ─── ORDERS ─────────────────────────────
 
-    def place_market_order(self, pair: str, side: str,
+    def place_market_order(self, pair    : str,
+                           side    : str,
                            quantity: float) -> dict:
         """Place market order"""
         try:
@@ -258,9 +388,14 @@ class OKXExchange:
         except Exception as e:
             logger.error(f"❌ Market order error: {e}")
             if cfg.IS_OKX_DEMO:
-                logger.info(f"📝 Demo mock order: {side} {pair}")
+                import time
+                mock_id = f"demo_{int(time.time())}"
+                logger.info(
+                    f"📝 Demo mock order #{mock_id}: "
+                    f"{side} {pair}"
+                )
                 return {
-                    "id"    : f"demo_{int(__import__('time').time())}",
+                    "id"    : mock_id,
                     "status": "closed",
                     "side"  : side,
                     "symbol": pair,
@@ -268,8 +403,10 @@ class OKXExchange:
                 }
             return {}
 
-    def place_limit_order(self, pair: str, side: str,
-                          quantity: float, price: float) -> dict:
+    def place_limit_order(self, pair    : str,
+                          side    : str,
+                          quantity: float,
+                          price   : float) -> dict:
         """Place limit order"""
         try:
             order = self.exchange.create_limit_order(
@@ -288,65 +425,74 @@ class OKXExchange:
             logger.error(f"❌ Limit order error: {e}")
             return {}
 
-    def place_stop_loss(self, pair: str, side: str,
-                        quantity: float, sl_price: float) -> dict:
+    def place_stop_loss(self, pair    : str,
+                        side    : str,
+                        quantity: float,
+                        sl_price: float) -> dict:
         """Place stop loss"""
         try:
-            sl_side = "sell" if side.lower() == "buy" else "buy"
-            order   = self.exchange.create_order(
-                pair,
-                "stop",
-                sl_side,
-                quantity,
-                sl_price,
+            sl_side = (
+                "sell" if side.lower() == "buy" else "buy"
+            )
+            order = self.exchange.create_order(
+                pair, "stop", sl_side, quantity, sl_price,
                 params={
                     "stopLossPrice": sl_price,
                     "tdMode"       : "cross",
                     "reduceOnly"   : True,
                 }
             )
-            logger.info(f"🛡️ SL placed: {pair} @ {sl_price}")
+            logger.info(
+                f"🛡️ SL placed: {pair} @ {sl_price}"
+            )
             return order
         except Exception as e:
             logger.error(f"❌ SL order error: {e}")
             if cfg.IS_OKX_DEMO:
-                logger.info(f"📝 Demo SL noted: {pair} @ {sl_price}")
+                logger.info(
+                    f"📝 Demo SL noted: {pair} @ {sl_price}"
+                )
                 return {"id": "demo_sl", "status": "open"}
             return {}
 
-    def place_take_profit(self, pair: str, side: str,
-                          quantity: float, tp_price: float) -> dict:
+    def place_take_profit(self, pair    : str,
+                          side    : str,
+                          quantity: float,
+                          tp_price: float) -> dict:
         """Place take profit"""
         try:
-            tp_side = "sell" if side.lower() == "buy" else "buy"
-            order   = self.exchange.create_order(
-                pair,
-                "stop",
-                tp_side,
-                quantity,
-                tp_price,
+            tp_side = (
+                "sell" if side.lower() == "buy" else "buy"
+            )
+            order = self.exchange.create_order(
+                pair, "stop", tp_side, quantity, tp_price,
                 params={
                     "takeProfitPrice": tp_price,
                     "tdMode"         : "cross",
                     "reduceOnly"     : True,
                 }
             )
-            logger.info(f"🎯 TP placed: {pair} @ {tp_price}")
+            logger.info(
+                f"🎯 TP placed: {pair} @ {tp_price}"
+            )
             return order
         except Exception as e:
             logger.error(f"❌ TP order error: {e}")
             if cfg.IS_OKX_DEMO:
-                logger.info(f"📝 Demo TP noted: {pair} @ {tp_price}")
+                logger.info(
+                    f"📝 Demo TP noted: {pair} @ {tp_price}"
+                )
                 return {"id": "demo_tp", "status": "open"}
             return {}
 
-    def cancel_order(self, pair: str, order_id: str) -> bool:
+    def cancel_order(self, pair    : str,
+                     order_id: str) -> bool:
         """Cancel order"""
         try:
-            if order_id.startswith("demo_"):
+            if str(order_id).startswith("demo_"):
                 return True
             self.exchange.cancel_order(order_id, pair)
-            logger.info(f"❌ Order cancelled: {order_id}")
+            logger.info(f"❌ Cancelled: {order_id}")
             return True
         except Exception as e:
             logger.error(f"❌ Cancel order error: {e}")
@@ -356,49 +502,95 @@ class OKXExchange:
         """Cancel semua order"""
         try:
             self.exchange.cancel_all_orders(pair)
-            logger.info(f"❌ All orders cancelled: {pair}")
+            logger.info(
+                f"❌ All orders cancelled: {pair}"
+            )
             return True
         except Exception as e:
-            logger.error(f"❌ Cancel all orders error: {e}")
-            if cfg.IS_OKX_DEMO:
-                return True
-            return False
+            logger.error(
+                f"❌ Cancel all orders error: {e}"
+            )
+            # Demo → anggap berhasil
+            return cfg.IS_OKX_DEMO
 
-    def close_position(self, pair: str, side: str,
+    def close_position(self, pair    : str,
+                       side    : str,
                        quantity: float) -> dict:
         """Close posisi"""
         try:
-            close_side = "sell" if side.lower() == "buy" else "buy"
-            order      = self.exchange.create_market_order(
-                pair,
-                close_side,
-                quantity,
+            close_side = (
+                "sell" if side.lower() == "buy" else "buy"
+            )
+            order = self.exchange.create_market_order(
+                pair, close_side, quantity,
                 params={
                     "reduceOnly": True,
                     "tdMode"    : "cross",
                 }
             )
-            logger.info(f"🔒 Closed: {pair} qty={quantity}")
+            logger.info(
+                f"🔒 Closed: {pair} qty={quantity}"
+            )
             return order
         except Exception as e:
             logger.error(f"❌ Close position error: {e}")
             if cfg.IS_OKX_DEMO:
-                logger.info(f"📝 Demo close noted: {pair}")
-                return {"id": "demo_close", "status": "closed"}
+                logger.info(
+                    f"📝 Demo close: {pair}"
+                )
+                return {
+                    "id"    : "demo_close",
+                    "status": "closed",
+                }
             return {}
 
-    # ─── MARKET INFO ─────────────────────────────────────────────────────────
+    # ─── MARKET INFO ────────────────────────
 
     def get_market_info(self, pair: str) -> dict:
         """Ambil info market"""
         try:
+            inst_id = pair
+            if "/" in pair:
+                base, quote = pair.split("/")
+                inst_id = f"{base}-{quote}-SWAP"
+
+            resp = req.get(
+                "https://www.okx.com/api/v5/public/instruments",
+                params={
+                    "instType": "SWAP",
+                    "instId"  : inst_id,
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == "0" and data.get("data"):
+                    inst = data["data"][0]
+                    return {
+                        "min_amount"      : float(
+                            inst.get("minSz", 0)
+                        ),
+                        "min_cost"        : 0,
+                        "amount_precision": len(
+                            inst.get("lotSz", "1").split(".")[-1]
+                        ) if "." in inst.get("lotSz", "1") else 0,
+                        "price_precision" : len(
+                            inst.get("tickSz", "0.1").split(".")[-1]
+                        ) if "." in inst.get("tickSz", "0.1") else 1,
+                    }
+
+            # Fallback ke ccxt
             markets   = self.exchange.load_markets()
             market    = markets.get(pair, {})
             limits    = market.get("limits", {})
             precision = market.get("precision", {})
             return {
-                "min_amount"      : limits.get("amount", {}).get("min", 0),
-                "min_cost"        : limits.get("cost",   {}).get("min", 0),
+                "min_amount"      : limits.get(
+                    "amount", {}
+                ).get("min", 0),
+                "min_cost"        : limits.get(
+                    "cost", {}
+                ).get("min", 0),
                 "amount_precision": precision.get("amount", 6),
                 "price_precision" : precision.get("price",  2),
             }

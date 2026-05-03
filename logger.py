@@ -4,17 +4,34 @@
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# ─── WIB Timezone ───────────────────────────
+WIB = timezone(timedelta(hours=7))
+
+
+class WIBFormatter(logging.Formatter):
+    """
+    Custom formatter yang pakai WIB (Asia/Jakarta, UTC+7)
+    untuk semua timestamp log — bukan waktu server (UTC).
+    """
+    def formatTime(self, record, datefmt=None):
+        # Konversi timestamp record ke WIB
+        dt = datetime.fromtimestamp(record.created, tz=WIB)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
 
 def setup_logger(name: str = "VortexBot") -> logging.Logger:
     """Setup logger dengan file dan console output"""
-    
+
     # Buat folder logs jika belum ada
     if not os.path.exists("logs"):
         os.makedirs("logs")
 
-    # Format log
-    log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    # Format log — semua timestamp akan WIB
+    log_format  = "%(asctime)s WIB | %(levelname)-8s | %(name)s | %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
 
     # Logger utama
@@ -29,23 +46,25 @@ def setup_logger(name: str = "VortexBot") -> logging.Logger:
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(
-        logging.Formatter(log_format, date_format)
+        WIBFormatter(log_format, date_format)
     )
 
-    # ─── File Handler (harian) ──────────────
-    log_filename = f"logs/vortex_{datetime.now().strftime('%Y%m%d')}.log"
+    # ─── File Handler (harian, nama file pakai tanggal WIB) ─
+    today_wib    = datetime.now(WIB).strftime("%Y%m%d")
+    log_filename = f"logs/vortex_{today_wib}.log"
     file_handler = logging.FileHandler(log_filename, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
-        logging.Formatter(log_format, date_format)
+        WIBFormatter(log_format, date_format)
     )
 
     # ─── Error File Handler ─────────────────
-    error_filename = f"logs/vortex_errors.log"
-    error_handler = logging.FileHandler(error_filename, encoding="utf-8")
+    error_handler = logging.FileHandler(
+        "logs/vortex_errors.log", encoding="utf-8"
+    )
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(
-        logging.Formatter(log_format, date_format)
+        WIBFormatter(log_format, date_format)
     )
 
     # Tambah semua handler
@@ -58,17 +77,22 @@ def setup_logger(name: str = "VortexBot") -> logging.Logger:
 
 # ─── Trade Logger ───────────────────────────
 def log_trade(action: str, pair: str, data: dict):
-    """Log khusus untuk setiap trade"""
+    """Log khusus untuk setiap trade (timestamp WIB)"""
     trade_logger = logging.getLogger("VortexBot.Trade")
-    
-    log_filename = f"logs/trades_{datetime.now().strftime('%Y%m')}.log"
-    if not any(isinstance(h, logging.FileHandler) 
-               and "trades_" in h.baseFilename 
-               for h in trade_logger.handlers):
+
+    # Nama file pakai bulan WIB
+    month_wib    = datetime.now(WIB).strftime("%Y%m")
+    log_filename = f"logs/trades_{month_wib}.log"
+
+    if not any(
+        isinstance(h, logging.FileHandler) and
+        "trades_" in h.baseFilename
+        for h in trade_logger.handlers
+    ):
         handler = logging.FileHandler(log_filename, encoding="utf-8")
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s | %(message)s", "%Y-%m-%d %H:%M:%S"
-        ))
+        handler.setFormatter(
+            WIBFormatter("%(asctime)s WIB | %(message)s", "%Y-%m-%d %H:%M:%S")
+        )
         trade_logger.addHandler(handler)
         trade_logger.setLevel(logging.INFO)
 

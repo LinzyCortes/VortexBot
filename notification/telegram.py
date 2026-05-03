@@ -4,9 +4,20 @@
 
 import requests
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from config import cfg
 from logger import logger
+
+# ─── WIB Timezone ────────────────────────────────────────────────────────────
+WIB = timezone(timedelta(hours=7))
+
+def _wib_now() -> datetime:
+    """Waktu sekarang dalam WIB"""
+    return datetime.now(WIB)
+
+def _wib_str(fmt: str = "%H:%M:%S WIB") -> str:
+    """Timestamp WIB siap pakai untuk notif"""
+    return _wib_now().strftime(fmt)
 
 
 class TelegramNotifier:
@@ -19,7 +30,7 @@ class TelegramNotifier:
         )
         self.enabled      = bool(self.token and self.chat_id)
         self.last_update  = 0
-        self.bot_ref      = None  # Reference ke VortexBot
+        self.bot_ref      = None
         self._polling     = False
 
     # ─── SEND ───────────────────────────────
@@ -30,7 +41,6 @@ class TelegramNotifier:
         if not self.enabled:
             return False
         try:
-            # Truncate kalau terlalu panjang
             if len(message) > 4096:
                 message = message[:4090] + "..."
 
@@ -70,11 +80,9 @@ class TelegramNotifier:
         logger.info("📱 Telegram command listener started!")
 
     def stop_polling(self):
-        """Stop command listener"""
         self._polling = False
 
     def _poll_loop(self):
-        """Loop polling update dari Telegram"""
         while self._polling:
             try:
                 updates = self._get_updates()
@@ -82,13 +90,10 @@ class TelegramNotifier:
                     self._handle_update(update)
             except Exception as e:
                 logger.debug(f"Poll error: {e}")
-
-            # Poll setiap 3 detik
             import time
             time.sleep(3)
 
     def _get_updates(self) -> list:
-        """Ambil update dari Telegram"""
         try:
             resp = requests.get(
                 f"{self.base_url}/getUpdates",
@@ -110,22 +115,18 @@ class TelegramNotifier:
         return []
 
     def _handle_update(self, update: dict):
-        """Handle command dari user"""
         try:
             msg  = update.get("message", {})
             text = msg.get("text", "").strip()
             cid  = str(msg.get("chat", {}).get("id", ""))
 
-            # Only respond to authorized chat
             if cid != str(self.chat_id):
                 return
-
             if not text.startswith("/"):
                 return
 
             logger.info(f"📱 Command received: {text}")
             response = self._process_command(text)
-
             if response:
                 self.send(response)
 
@@ -133,7 +134,6 @@ class TelegramNotifier:
             logger.debug(f"Handle update error: {e}")
 
     def _process_command(self, command: str) -> str:
-        """Proses command & return response"""
         cmd = command.lower().split()[0]
 
         try:
@@ -163,29 +163,27 @@ class TelegramNotifier:
                 status  = "⛔ PAUSED" if pause["paused"] \
                     else "✅ RUNNING"
                 consec  = risk_manager.get_consecutive_losses()
-                recover = bool(
-                    db.get_state("recovery_mode")
-                )
+                recover = bool(db.get_state("recovery_mode"))
 
                 return (
                     f"🤖 <b>BOT STATUS</b>\n"
                     f"{'='*30}\n"
-                    f"Status    : {status}\n"
-                    f"Balance   : ${balance:.4f}\n"
-                    f"Mode      : {self._get_mode(balance)}\n"
+                    f"Status     : {status}\n"
+                    f"Balance    : ${balance:.4f}\n"
+                    f"Mode       : {self._get_mode(balance)}\n"
                     f"Consec Loss: {consec}\n"
-                    f"Recovery  : {'ON' if recover else 'OFF'}\n"
+                    f"Recovery   : {'ON' if recover else 'OFF'}\n"
                     f"{'='*30}\n"
-                    f"⏰ {datetime.now().strftime('%H:%M WIB')}"
+                    f"⏰ {_wib_str()}"
                 )
 
             elif cmd == "/balance":
                 balance = risk_manager.get_virtual_balance() \
                     if (cfg.IS_OKX and cfg.IS_OKX_DEMO) \
                     else 0
-                start   = risk_manager.get_starting_balance()
-                change  = balance - start
-                sign    = "+" if change >= 0 else ""
+                start  = risk_manager.get_starting_balance()
+                change = balance - start
+                sign   = "+" if change >= 0 else ""
 
                 return (
                     f"💰 <b>BALANCE</b>\n"
@@ -193,17 +191,16 @@ class TelegramNotifier:
                     f"Current  : ${balance:.4f}\n"
                     f"Start    : ${start:.4f}\n"
                     f"Change   : {sign}${change:.4f}\n"
-                    f"Mode     : {self._get_mode(balance)}"
+                    f"Mode     : {self._get_mode(balance)}\n"
+                    f"⏰ {_wib_str()}"
                 )
 
             elif cmd == "/trades":
                 open_t = db.get_open_trades()
                 if not open_t:
                     return "📊 Tidak ada open trade saat ini."
-
                 text = f"📊 <b>OPEN TRADES ({len(open_t)})</b>\n"
                 for t in open_t:
-                    pnl_est = "N/A"
                     text += (
                         f"• #{t['id']} {t['pair']} "
                         f"{t['direction']} "
@@ -229,7 +226,8 @@ class TelegramNotifier:
                     f"Best Trade  : "
                     f"+${stats.get('best_trade',0):.4f}\n"
                     f"Worst Trade : "
-                    f"${stats.get('worst_trade',0):.4f}"
+                    f"${stats.get('worst_trade',0):.4f}\n"
+                    f"⏰ {_wib_str()}"
                 )
 
             elif cmd == "/pause":
@@ -257,14 +255,11 @@ class TelegramNotifier:
                 total_pnl = sum(
                     t.get("pnl", 0) for t in trades
                 )
-                wr = (
-                    wins/len(trades)*100
-                    if trades else 0
-                )
+                wr = wins / len(trades) * 100 if trades else 0
 
                 return (
                     f"📊 <b>LAPORAN HARI INI</b>\n"
-                    f"{datetime.now().strftime('%d %B %Y')}\n"
+                    f"{_wib_str('%d %B %Y')}\n"
                     f"{'='*30}\n"
                     f"Total Trade : {len(trades)}\n"
                     f"Win / Loss  : {wins} / {losses}\n"
@@ -272,7 +267,8 @@ class TelegramNotifier:
                     f"Total PnL   : "
                     f"{'+' if total_pnl >= 0 else ''}"
                     f"${total_pnl:.4f}\n"
-                    f"Balance     : ${balance:.4f}"
+                    f"Balance     : ${balance:.4f}\n"
+                    f"⏰ {_wib_str()}"
                 )
 
             elif cmd == "/score":
@@ -297,7 +293,6 @@ class TelegramNotifier:
     # ─── BOT NOTIFICATIONS ──────────────────
 
     def send_bot_started(self, balance: float):
-        """Notif bot started"""
         if cfg.IS_OKX:
             exc = "OKX Demo" if cfg.IS_OKX_DEMO else "OKX Live"
         else:
@@ -312,39 +307,38 @@ class TelegramNotifier:
             f"📈 Exchange  : <b>{exc}</b>\n"
             f"📊 Pairs     : <b>{', '.join(cfg.PAIRS)}</b>\n"
             f"⏰ Killzone  : <b>London & New York</b>\n"
-            f"🎯 Min Score : <b>"
-            f"{cfg.MIN_CONFLUENCE_SCORE}/16</b>\n"
+            f"🎯 Min Score : <b>{cfg.MIN_CONFLUENCE_SCORE}/16</b>\n"
             f"📉 Max Risk  : <b>1–1.5% per trade</b>\n"
             f"{'='*35}\n"
             f"🤖 Bot monitoring market...\n"
-            f"📱 Ketik /help untuk commands!"
+            f"📱 Ketik /help untuk commands!\n"
+            f"⏰ {_wib_str()}"
         )
         self.send(msg)
 
     def send_bot_stopped(self, reason: str = "Manual"):
         msg = (
             f"⛔ <b>VΦrtex Bot STOPPED</b>\n"
-            f"Reason: {reason}\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S WIB')}"
+            f"Reason : {reason}\n"
+            f"⏰ {_wib_str()}"
         )
         self.send(msg)
 
     def send_morning_briefing(self, balance: float,
                                upcoming_news: list,
                                market_regime: str):
-        """Morning briefing 07:00 WIB"""
-        now_wib = (datetime.utcnow().hour + 7) % 24
+        """Morning briefing — dikirim jam 07:00 WIB"""
+        now = _wib_now()
 
         news_text = ""
         if upcoming_news:
-            news_text = "\n📰 <b>High Impact News:</b>\n"
+            news_text = "\n📰 <b>High Impact News Hari Ini:</b>\n"
             for n in upcoming_news[:3]:
-                news_text += (
-                    f"  • {n['title']} "
-                    f"({n.get('minutes_away','?')} mnt)\n"
-                )
+                # Tampilkan waktu WIB kalau ada, fallback ke minutes_away
+                t = n.get("time_wib") or f"{n.get('minutes_away','?')} mnt lagi"
+                news_text += f"  • {n['title']} ({t})\n"
         else:
-            news_text = "\n✅ Tidak ada high-impact news\n"
+            news_text = "\n✅ Tidak ada high-impact news hari ini\n"
 
         regime_map = {
             "BULL"           : "📈 Bullish",
@@ -353,37 +347,37 @@ class TelegramNotifier:
             "HIGH_VOLATILITY": "⚡ High Volatility",
             "UNKNOWN"        : "❓ Scanning...",
         }
-        regime_text = regime_map.get(
-            market_regime, "❓ Unknown"
-        )
+        regime_text = regime_map.get(market_regime, "❓ Unknown")
 
         msg = (
             f"☀️ <b>SELAMAT PAGI — VΦrtex Bot</b>\n"
             f"{'='*35}\n"
-            f"📅 {datetime.now().strftime('%A, %d %B %Y')}\n"
-            f"⏰ {now_wib:02d}:00 WIB\n"
+            f"📅 {now.strftime('%A, %d %B %Y')}\n"
+            f"⏰ {now.strftime('%H:%M WIB')}\n"
             f"{'='*35}\n"
             f"💰 Balance    : <b>${balance:.4f}</b>\n"
             f"🌍 Market     : <b>{regime_text}</b>\n"
             f"{news_text}"
             f"{'='*35}\n"
-            f"⏰ London  : 14:00 WIB\n"
-            f"⏰ New York: 19:30 WIB\n"
+            f"📋 Jadwal Hari Ini:\n"
+            f"  🟡 Pre-London  : 13:45 WIB\n"
+            f"  🟢 London      : 14:00 – 17:00 WIB\n"
+            f"  🟡 Pre-NY      : 19:15 WIB\n"
+            f"  🟢 New York    : 19:30 – 23:00 WIB\n"
+            f"{'='*35}\n"
             f"🤖 Bot aktif & siap hunting setup!\n"
             f"📱 Ketik /help untuk commands"
         )
         self.send(msg)
 
     def send_signal_detected(self, signal: dict):
-        """Notif signal detected"""
         pair      = signal.get("pair", "")
         direction = signal.get("direction", "")
         score     = signal.get("confluence_score", 0)
         grade     = signal.get("grade", "")
         session   = signal.get("session", "")
         fib       = signal.get("fib_level", "N/A")
-        dir_emoji = "🟢 LONG" if direction == "BUY" \
-            else "🔴 SHORT"
+        dir_emoji = "🟢 LONG" if direction == "BUY" else "🔴 SHORT"
 
         reasons      = signal.get("top_reasons", [])
         reasons_text = ""
@@ -400,12 +394,12 @@ class TelegramNotifier:
             f"Fibonacci: <b>{fib}</b>\n"
             f"{'='*35}\n"
             f"{reasons_text}"
-            f"⏳ Menunggu konfirmasi entry..."
+            f"⏳ Menunggu konfirmasi entry...\n"
+            f"⏰ {_wib_str()}"
         )
         self.send(msg)
 
     def send_trade_opened(self, trade: dict):
-        """Notif trade opened"""
         pair     = trade.get("pair", "")
         direction= trade.get("direction", "")
         entry    = trade.get("entry_price", 0)
@@ -419,8 +413,7 @@ class TelegramNotifier:
         risk_amt = trade.get("risk_amount", 0)
         mode     = trade.get("mode", "")
 
-        dir_emoji = "🟢 LONG" if direction == "BUY" \
-            else "🔴 SHORT"
+        dir_emoji = "🟢 LONG" if direction == "BUY" else "🔴 SHORT"
         risk = abs(entry - sl)
         rr2  = abs(tp2 - entry) / risk if risk > 0 else 0
 
@@ -442,13 +435,11 @@ class TelegramNotifier:
             f"🏆 Score : <b>{score}/16</b>\n"
             f"💼 Mode  : <b>{mode}</b>\n"
             f"{'='*35}\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S WIB')}"
+            f"⏰ {_wib_str()}"
         )
         self.send(msg)
 
-    def send_trade_closed(self, trade: dict,
-                          close_data: dict):
-        """Notif trade closed"""
+    def send_trade_closed(self, trade: dict, close_data: dict):
         pair     = trade.get("pair", "")
         direction= trade.get("direction", "")
         entry    = trade.get("entry_price", 0)
@@ -458,10 +449,10 @@ class TelegramNotifier:
         duration = close_data.get("duration_minutes", 0)
         balance  = close_data.get("new_balance", 0)
 
-        hours    = duration // 60
-        mins     = duration % 60
-        result   = "✅ PROFIT" if pnl > 0 else "❌ LOSS"
-        sign     = "+" if pnl > 0 else ""
+        hours  = duration // 60
+        mins   = duration % 60
+        result = "✅ PROFIT" if pnl > 0 else "❌ LOSS"
+        sign   = "+" if pnl > 0 else ""
 
         reason_map = {
             "TP1"          : "🎯 TP1 (Fib 1.272)",
@@ -485,7 +476,7 @@ class TelegramNotifier:
             f"⏱️ Durasi : <b>{hours}j {mins}m</b>\n"
             f"{'='*35}\n"
             f"💼 Balance : <b>${balance:.4f}</b>\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S WIB')}"
+            f"⏰ {_wib_str()}"
         )
         self.send(msg)
 
@@ -493,7 +484,6 @@ class TelegramNotifier:
                            tp_hit    : str,
                            close_pct : int,
                            pnl_partial: float):
-        """Notif partial close"""
         pair = trade.get("pair", "")
         sign = "+" if pnl_partial >= 0 else ""
         msg  = (
@@ -504,7 +494,7 @@ class TelegramNotifier:
             f"PnL    : <b>{sign}${pnl_partial:.4f}</b>\n"
             f"Action : SL → Breakeven ✅\n"
             f"Sisa   : {100-close_pct}% still running\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S WIB')}"
+            f"⏰ {_wib_str()}"
         )
         self.send(msg)
 
@@ -512,42 +502,43 @@ class TelegramNotifier:
                              limit_pct: float,
                              balance: float,
                              paused: bool = False):
-        """Alert drawdown"""
         if paused:
             msg = (
                 f"⚠️ <b>BOT PAUSED — DRAWDOWN!</b>\n"
                 f"📉 Drawdown: <b>{drawdown_pct:.2f}%</b>\n"
                 f"🚫 Limit   : <b>{limit_pct}%</b>\n"
                 f"💰 Balance : <b>${balance:.4f}</b>\n"
-                f"Resume besok otomatis! 🔄"
+                f"Resume besok otomatis! 🔄\n"
+                f"⏰ {_wib_str()}"
             )
         else:
             msg = (
                 f"⚠️ <b>DRAWDOWN WARNING</b>\n"
                 f"📉 {drawdown_pct:.2f}% / {limit_pct}%\n"
-                f"💰 ${balance:.4f}"
+                f"💰 ${balance:.4f}\n"
+                f"⏰ {_wib_str()}"
             )
         self.send(msg)
 
     def send_consecutive_loss_alert(self, count: int,
                                      paused: bool):
-        """Alert consecutive loss"""
         if paused:
             msg = (
                 f"⛔ <b>BOT PAUSED — {count}x LOSS!</b>\n"
                 f"❌ Consecutive loss: <b>{count}</b>\n"
                 f"⏸️ Pause 24 jam — recovery mode ON\n"
-                f"💪 Ini perlindungan modal!"
+                f"💪 Ini perlindungan modal!\n"
+                f"⏰ {_wib_str()}"
             )
         else:
             msg = (
                 f"⚠️ <b>LOSS WARNING: {count}x</b>\n"
-                f"Pantau bot!"
+                f"Pantau bot!\n"
+                f"⏰ {_wib_str()}"
             )
         self.send(msg)
 
     def send_weekly_summary(self, stats: dict):
-        """Weekly summary"""
         total  = stats.get("total_trades", 0)
         wins   = stats.get("wins", 0)
         losses = stats.get("losses", 0)
@@ -557,11 +548,11 @@ class TelegramNotifier:
         worst  = stats.get("worst_trade", 0)
         bal    = stats.get("balance", 0)
         sign   = "+" if pnl >= 0 else ""
-        result = "📈 PROFIT WEEK" if pnl >= 0 \
-            else "📉 LOSS WEEK"
+        result = "📈 PROFIT WEEK" if pnl >= 0 else "📉 LOSS WEEK"
 
         msg = (
             f"📊 <b>WEEKLY SUMMARY</b>\n"
+            f"{_wib_str('%d %B %Y')}\n"
             f"{'='*35}\n"
             f"{result}\n"
             f"{'='*35}\n"
@@ -578,19 +569,19 @@ class TelegramNotifier:
         self.send(msg)
 
     def send_daily_summary(self, stats: dict):
-        """Daily summary"""
+        """Daily summary — dikirim jam 22:00 WIB"""
         total  = stats.get("total_trades", 0)
         wins   = stats.get("wins", 0)
         losses = stats.get("losses", 0)
         pnl    = stats.get("total_pnl", 0)
         bal    = stats.get("balance", 0)
-        wr     = (wins/total*100) if total > 0 else 0
+        wr     = (wins / total * 100) if total > 0 else 0
         sign   = "+" if pnl >= 0 else ""
         emoji  = "✅" if pnl >= 0 else "❌"
 
         msg = (
             f"{emoji} <b>DAILY SUMMARY</b>\n"
-            f"{datetime.now().strftime('%d %B %Y')}\n"
+            f"{_wib_str('%A, %d %B %Y')}\n"
             f"{'='*35}\n"
             f"Total   : <b>{total}</b>\n"
             f"Win/Loss: <b>{wins}/{losses}</b>\n"
@@ -599,14 +590,14 @@ class TelegramNotifier:
             f"Balance : <b>${bal:.4f}</b>\n"
             f"{'='*35}\n"
             f"🌙 Istirahat baik!\n"
-            f"Bot tetap jaga market."
+            f"Bot tetap jaga market.\n"
+            f"⏰ {_wib_str()}"
         )
         self.send(msg)
 
     def send_health_check(self, uptime: float,
                            balance: float,
                            open_trades: int):
-        """Health check notif"""
         msg = (
             f"💚 <b>BOT HEALTH CHECK</b>\n"
             f"{'='*35}\n"
@@ -614,21 +605,20 @@ class TelegramNotifier:
             f"⏱️ Uptime : <b>{uptime:.1f} jam</b>\n"
             f"💰 Balance : <b>${balance:.4f}</b>\n"
             f"📊 Open    : <b>{open_trades} trade(s)</b>\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S WIB')}\n"
             f"{'='*35}\n"
             f"🤖 Semua sistem normal!\n"
-            f"📱 /help untuk commands"
+            f"📱 /help untuk commands\n"
+            f"⏰ {_wib_str()}"
         )
         self.send(msg)
 
     def test_connection(self) -> bool:
-        """Test koneksi"""
         try:
             return self.send(
                 f"🔧 <b>VΦrtex Bot — Connected!</b>\n"
                 f"✅ Telegram OK\n"
                 f"📱 Ketik /help untuk commands\n"
-                f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                f"⏰ {_wib_str()}"
             )
         except Exception as e:
             logger.error(f"❌ Test error: {e}")
@@ -644,7 +634,6 @@ class TelegramNotifier:
             return "MEDIUM ($20-100)"
         return "STANDARD ($100+)"
 
-    # Backward compat
     def process_command(self, command: str,
                         bot_data: dict) -> str:
         return self._process_command(command)

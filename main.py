@@ -5,7 +5,7 @@
 
 import time
 import schedule
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from config import cfg
 from logger import logger
 from database import db
@@ -18,6 +18,39 @@ from strategy.confluence import confluence_scorer
 from risk.management import risk_manager
 from notification.telegram import telegram
 from learning.evaluator import evaluator
+
+# ─── Timezone Helpers ────────────────────────────────────────────────────────
+WIB = timezone(timedelta(hours=7))
+UTC = timezone.utc
+
+def now_wib() -> datetime:
+    """Waktu sekarang dalam WIB (Asia/Jakarta) — untuk display & notifikasi"""
+    return datetime.now(WIB)
+
+def now_utc() -> datetime:
+    """Waktu sekarang dalam UTC — untuk trading logic & exchange"""
+    return datetime.now(UTC)
+
+def wib_str(dt: datetime = None) -> str:
+    """Format datetime ke string WIB. Jika dt=None, pakai waktu sekarang."""
+    if dt is None:
+        dt = now_wib()
+    elif dt.tzinfo is None:
+        # naive datetime → anggap UTC, konversi ke WIB
+        dt = dt.replace(tzinfo=UTC).astimezone(WIB)
+    else:
+        dt = dt.astimezone(WIB)
+    return dt.strftime("%H:%M:%S WIB")
+
+def utc_str(dt: datetime = None) -> str:
+    """Format datetime ke string UTC."""
+    if dt is None:
+        dt = now_utc()
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return dt.strftime("%H:%M:%S UTC")
 
 # ─── Dynamic Exchange Import ─────────────────────────────────────────────────
 if cfg.IS_OKX:
@@ -34,7 +67,7 @@ class VortexBot:
         self.name        = "VΦrtex Bot"
         self.version     = "1.0"
         self.running     = False
-        self.start_time  = None
+        self.start_time  = None   # disimpan dalam UTC
         self.pairs       = cfg.PAIRS
         self.open_trades = {}
         logger.info(
@@ -52,7 +85,10 @@ class VortexBot:
 
     def startup(self) -> bool:
         """Inisialisasi bot"""
-        logger.info(f"🚀 Starting VΦrtex Bot on {EXCHANGE_NAME}...")
+        logger.info(
+            f"🚀 Starting VΦrtex Bot on {EXCHANGE_NAME}...\n"
+            f"   WIB : {wib_str()} | UTC : {utc_str()}"
+        )
 
         # 1. Test koneksi exchange
         if not exchange.is_connected():
@@ -89,9 +125,9 @@ class VortexBot:
         telegram.start_polling(bot_ref=self)
         logger.info("📱 Telegram commands active!")
 
-        # 6. Set running
+        # 6. Set running (start_time pakai UTC untuk kalkulasi durasi)
         self.running    = True
-        self.start_time = datetime.now()
+        self.start_time = now_utc()
 
         cap_mode = cfg.get_capital_mode(balance)
         logger.info(
@@ -100,7 +136,9 @@ class VortexBot:
             f"   Balance  : ${balance:.4f}\n"
             f"   Mode     : {cap_mode['mode']}\n"
             f"   Pairs    : {', '.join(self.pairs)}\n"
-            f"   Capital  : ${cfg.CAPITAL}"
+            f"   Capital  : ${cfg.CAPITAL}\n"
+            f"   Time WIB : {wib_str()}\n"
+            f"   Time UTC : {utc_str()}"
         )
         return True
 
@@ -108,12 +146,15 @@ class VortexBot:
         if not db.get_state("weekly_starting_balance"):
             db.set_state("weekly_starting_balance", {
                 "balance": balance,
-                "date"   : datetime.now().isoformat(),
+                # Simpan keduanya untuk referensi
+                "date_wib": now_wib().isoformat(),
+                "date_utc": now_utc().isoformat(),
             })
         if not db.get_state("monthly_starting_balance"):
             db.set_state("monthly_starting_balance", {
                 "balance": balance,
-                "date"   : datetime.now().isoformat(),
+                "date_wib": now_wib().isoformat(),
+                "date_utc": now_utc().isoformat(),
             })
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -284,7 +325,10 @@ class VortexBot:
                 "tf_bias"         : cfg.TF_BIAS,
                 "tf_setup"        : cfg.TF_SETUP,
                 "tf_entry"        : cfg.TF_ENTRY,
-                "detected_at"     : datetime.now().isoformat(),
+                # Simpan keduanya — WIB untuk display, UTC untuk audit
+                "detected_at_wib" : now_wib().isoformat(),
+                "detected_at_utc" : now_utc().isoformat(),
+                "detected_at"     : now_wib().isoformat(),  # default WIB
                 "exchange"        : EXCHANGE_NAME,
             }
 
@@ -294,7 +338,8 @@ class VortexBot:
             logger.info(
                 f"🎯 VALID SIGNAL!\n"
                 f"   {pair} {direction} "
-                f"Score:{score}/16 RR:1:{rr2:.1f}"
+                f"Score:{score}/16 RR:1:{rr2:.1f} | "
+                f"{wib_str()}"
             )
 
             return signal
@@ -390,7 +435,8 @@ class VortexBot:
             self.open_trades[trade_id] = {
                 **trade_data,
                 "trade_id"          : trade_id,
-                "open_time"         : datetime.now(),
+                "open_time"         : now_utc(),   # UTC untuk kalkulasi durasi
+                "open_time_wib"     : now_wib(),   # WIB untuk display
                 "tp1_closed"        : False,
                 "quantity_remaining": quantity,
                 "original_qty"      : quantity,
@@ -408,17 +454,13 @@ class VortexBot:
                 "score_breakdown": signal.get("score_breakdown", {}),
             })
 
-            # Simpan ke file
             journal.save_trade_journal(trade_id, entry_reason)
 
-            # Update virtual balance (reserve)
             if cfg.IS_OKX and cfg.IS_OKX_DEMO:
                 risk_manager.reserve_balance(position.get("risk_amount", 0))
 
-            # Kirim jurnal entry ke Telegram
             journal.send_entry_journal_to_telegram(trade_id, signal, entry_reason)
 
-            # Kirim notif trade opened
             telegram.send_trade_opened({
                 **trade_data,
                 "confluence_score": signal.get("confluence_score"),
@@ -428,7 +470,8 @@ class VortexBot:
                 f"✅ TRADE EXECUTED #{trade_id}\n"
                 f"   {pair} {direction} | "
                 f"qty={quantity} lev={leverage}x | "
-                f"entry={entry:.4f} sl={sl:.4f}"
+                f"entry={entry:.4f} sl={sl:.4f} | "
+                f"{wib_str()}"
             )
 
         except Exception as e:
@@ -466,7 +509,6 @@ class VortexBot:
                     ind    = indicators.calculate_all(df_15m)
                     atr    = ind.get("atr", 0)
 
-                # Partial close
                 partial = risk_manager.should_partial_close(
                     entry    =entry,
                     current  =current,
@@ -481,11 +523,9 @@ class VortexBot:
                     )
                     continue
 
-                # Trailing stop
                 if tp1_closed and atr > 0:
                     self._handle_trailing_stop(trade_id, trade, current, atr)
 
-                # SL check
                 sl_hit = (
                     (direction == "BUY"  and current <= sl) or
                     (direction == "SELL" and current >= sl)
@@ -527,7 +567,7 @@ class VortexBot:
             telegram.send_partial_close(trade, tp_hit, close_pct, pnl)
             logger.info(
                 f"🎯 Partial close: {pair} {tp_hit} "
-                f"pnl=+{pnl:.4f}"
+                f"pnl=+{pnl:.4f} | {wib_str()}"
             )
         except Exception as e:
             logger.error(f"❌ Partial close error: {e}")
@@ -563,7 +603,7 @@ class VortexBot:
                 self.open_trades[trade_id]["sl_price"] = new_sl
                 logger.info(
                     f"🔄 Trailing: {pair} SL "
-                    f"{old_sl:.4f}→{new_sl:.4f}"
+                    f"{old_sl:.4f}→{new_sl:.4f} | {wib_str()}"
                 )
         except Exception as e:
             logger.error(f"❌ Trailing stop error: {e}")
@@ -574,7 +614,7 @@ class VortexBot:
             direction = trade.get("direction")
             entry     = trade.get("entry_price")
             qty       = trade.get("quantity_remaining")
-            open_time = trade.get("open_time")
+            open_time = trade.get("open_time")  # UTC datetime
 
             pnl = (
                 (close_price - entry) * qty
@@ -582,8 +622,9 @@ class VortexBot:
                 else (entry - close_price) * qty
             )
 
+            # Kalkulasi durasi pakai UTC (akurat)
             duration = int(
-                (datetime.now() - open_time).seconds / 60
+                (now_utc() - open_time).seconds / 60
             ) if isinstance(open_time, datetime) else 0
 
             sl   = trade.get("sl_price", entry)
@@ -604,20 +645,18 @@ class VortexBot:
                 "close_price"     : close_price,
                 "duration_minutes": duration,
                 "new_balance"     : new_balance,
+                "close_time_wib"  : now_wib().isoformat(),
+                "close_time_utc"  : now_utc().isoformat(),
             }
             db.close_trade(trade_id, close_data)
 
-            # Compound virtual balance
             if cfg.IS_OKX and cfg.IS_OKX_DEMO:
                 new_bal = risk_manager.update_virtual_balance_after_trade(pnl)
                 risk_manager.release_balance(trade.get("risk_amount", 0))
-
-                # Update OKX virtual balance
                 from exchange.okx import okx
-                okx._virtual_balance   = new_bal
+                okx._virtual_balance      = new_bal
                 close_data["new_balance"] = new_bal
 
-            # ── Auto journal close + Kirim ke Telegram ────────────────────────
             close_text = journal.generate_close_reason(trade, close_data)
             journal.save_trade_journal(
                 trade_id,
@@ -625,7 +664,6 @@ class VortexBot:
                 close_text
             )
 
-            # Kirim close journal ke Telegram
             journal.send_close_journal_to_telegram(trade_id, close_text, pnl)
 
             risk_manager.record_trade_result(pnl > 0)
@@ -641,7 +679,8 @@ class VortexBot:
             logger.info(
                 f"{result} #{trade_id} | {pair} {direction} | "
                 f"pnl={'+' if pnl > 0 else ''}{pnl:.4f} | "
-                f"rr=1:{rr:.2f} | reason={reason}"
+                f"rr=1:{rr:.2f} | reason={reason} | "
+                f"{wib_str()}"
             )
 
         except Exception as e:
@@ -649,19 +688,59 @@ class VortexBot:
 
     # ═════════════════════════════════════════════════════════════════════════
     # SCHEDULED TASKS
+    # ─────────────────────────────────────────────────────────────────────────
+    # PENTING: Railway/server jalan di UTC.
+    # Semua jadwal di bawah sudah dikonversi ke UTC agar pas di WIB.
+    # Rumus: UTC = WIB - 7 jam
+    #
+    # WIB 00:00 → UTC 17:00 (hari sebelumnya)
+    # WIB 00:01 → UTC 17:01 (hari sebelumnya)
+    # WIB 10:00 → UTC 03:00
+    # WIB 15:00 → UTC 08:00
+    # WIB 16:30 → UTC 09:30
+    # WIB 14:00 → UTC 07:00
+    # WIB 15:00 → UTC 08:00
     # ═════════════════════════════════════════════════════════════════════════
 
     def setup_scheduled_tasks(self):
-        schedule.every().day.at("00:00").do(self._morning_briefing)
-        schedule.every().day.at("15:00").do(self._daily_summary)
+        # Morning briefing  → WIB 00:00 = UTC 17:00
+        schedule.every().day.at("17:00").do(self._morning_briefing)
+
+        # Daily summary     → WIB 15:00 = UTC 08:00
+        schedule.every().day.at("08:00").do(self._daily_summary)
+
+        # Health check      → setiap 6 jam (tidak perlu konversi)
         schedule.every(6).hours.do(self._health_check)
-        schedule.every().sunday.at("14:00").do(self._weekly_summary)
-        schedule.every().sunday.at("15:00").do(self._run_weekly_evaluation)
-        schedule.every().day.at("10:00").do(self._london_session_summary)
-        schedule.every().day.at("16:30").do(self._ny_session_summary)
-        schedule.every().monday.at("00:01").do(self._reset_weekly_balance)
-        schedule.every().day.at("00:01").do(self._check_monthly_reset)
-        logger.info("📅 Scheduled tasks configured!")
+
+        # Weekly summary    → WIB Minggu 14:00 = UTC Minggu 07:00
+        schedule.every().sunday.at("07:00").do(self._weekly_summary)
+
+        # Weekly evaluation → WIB Minggu 15:00 = UTC Minggu 08:00
+        schedule.every().sunday.at("08:00").do(self._run_weekly_evaluation)
+
+        # London session summary → WIB 10:00 = UTC 03:00
+        schedule.every().day.at("03:00").do(self._london_session_summary)
+
+        # NY session summary     → WIB 16:30 = UTC 09:30
+        schedule.every().day.at("09:30").do(self._ny_session_summary)
+
+        # Reset weekly balance   → WIB Senin 00:01 = UTC Minggu 17:01
+        schedule.every().sunday.at("17:01").do(self._reset_weekly_balance)
+
+        # Monthly reset check    → WIB 00:01 = UTC 17:01 (hari sebelumnya)
+        schedule.every().day.at("17:01").do(self._check_monthly_reset)
+
+        logger.info(
+            "📅 Scheduled tasks configured! (Jadwal dalam UTC, tampil WIB)\n"
+            "   Morning briefing  : 00:00 WIB (17:00 UTC)\n"
+            "   Daily summary     : 15:00 WIB (08:00 UTC)\n"
+            "   London summary    : 10:00 WIB (03:00 UTC)\n"
+            "   NY summary        : 16:30 WIB (09:30 UTC)\n"
+            "   Weekly summary    : Minggu 14:00 WIB (07:00 UTC)\n"
+            "   Weekly evaluation : Minggu 15:00 WIB (08:00 UTC)\n"
+            "   Weekly reset      : Senin 00:01 WIB (Minggu 17:01 UTC)\n"
+            "   Monthly reset     : Setiap tgl 1, 00:01 WIB (17:01 UTC)"
+        )
 
     def _morning_briefing(self):
         try:
@@ -673,7 +752,7 @@ class VortexBot:
                 "regime", "UNKNOWN"
             )
             telegram.send_morning_briefing(balance, upcoming, regime)
-            logger.info("☀️ Morning briefing sent!")
+            logger.info(f"☀️ Morning briefing sent! | {wib_str()}")
         except Exception as e:
             logger.error(f"❌ Morning briefing error: {e}")
 
@@ -699,19 +778,23 @@ class VortexBot:
                 "balance"     : balance,
             })
             journal.generate_monthly_report()
-            logger.info("📊 Daily summary sent!")
+            logger.info(f"📊 Daily summary sent! | {wib_str()}")
         except Exception as e:
             logger.error(f"❌ Daily summary error: {e}")
 
     def _health_check(self):
         try:
+            # Uptime dihitung dari UTC (akurat)
             uptime = (
-                (datetime.now() - self.start_time).seconds / 3600
+                (now_utc() - self.start_time).seconds / 3600
                 if self.start_time else 0
             )
             balance = exchange.get_balance().get("free", 0)
             telegram.send_health_check(uptime, balance, len(self.open_trades))
-            logger.info(f"💚 Health check: {uptime:.1f}h")
+            logger.info(
+                f"💚 Health check: {uptime:.1f}h | "
+                f"{wib_str()} | {utc_str()}"
+            )
         except Exception as e:
             logger.error(f"❌ Health check error: {e}")
 
@@ -720,20 +803,20 @@ class VortexBot:
             stats            = db.get_overall_stats()
             stats["balance"] = exchange.get_balance().get("free", 0)
             telegram.send_weekly_summary(stats)
-            logger.info("📈 Weekly summary sent!")
+            logger.info(f"📈 Weekly summary sent! | {wib_str()}")
         except Exception as e:
             logger.error(f"❌ Weekly summary error: {e}")
 
     def _run_weekly_evaluation(self):
         try:
-            logger.info("🧠 Running weekly evaluation...")
+            logger.info(f"🧠 Running weekly evaluation... | {wib_str()}")
             report  = evaluator.run_weekly_evaluation()
             summary = "\n".join(report.split("\n")[:25])
             telegram.send(
                 f"🧠 <b>WEEKLY EVALUATION</b>\n"
                 f"<pre>{summary[:3500]}</pre>"
             )
-            logger.info("✅ Weekly evaluation sent!")
+            logger.info(f"✅ Weekly evaluation sent! | {wib_str()}")
         except Exception as e:
             logger.error(f"❌ Weekly eval error: {e}")
 
@@ -749,7 +832,7 @@ class VortexBot:
                     f"📋 <b>LONDON SESSION DONE</b>\n"
                     f"<pre>{summary[:3500]}</pre>"
                 )
-            logger.info("📋 London summary sent!")
+            logger.info(f"📋 London summary sent! | {wib_str()}")
         except Exception as e:
             logger.error(f"❌ London summary error: {e}")
 
@@ -765,7 +848,7 @@ class VortexBot:
                     f"📋 <b>NY SESSION DONE</b>\n"
                     f"<pre>{summary[:3500]}</pre>"
                 )
-            logger.info("📋 NY summary sent!")
+            logger.info(f"📋 NY summary sent! | {wib_str()}")
         except Exception as e:
             logger.error(f"❌ NY summary error: {e}")
 
@@ -773,22 +856,29 @@ class VortexBot:
         try:
             balance = exchange.get_balance().get("free", 0)
             db.set_state("weekly_starting_balance", {
-                "balance": balance,
-                "date"   : datetime.now().isoformat(),
+                "balance" : balance,
+                "date_wib": now_wib().isoformat(),
+                "date_utc": now_utc().isoformat(),
             })
-            logger.info(f"📅 Weekly reset: ${balance:.4f}")
+            logger.info(
+                f"📅 Weekly reset: ${balance:.4f} | {wib_str()}"
+            )
         except Exception as e:
             logger.error(f"❌ Weekly reset error: {e}")
 
     def _check_monthly_reset(self):
         try:
-            if datetime.now().day == 1:
+            # Cek hari WIB (bukan UTC) karena reset berdasarkan kalender WIB
+            if now_wib().day == 1:
                 balance = exchange.get_balance().get("free", 0)
                 db.set_state("monthly_starting_balance", {
-                    "balance": balance,
-                    "date"   : datetime.now().isoformat(),
+                    "balance" : balance,
+                    "date_wib": now_wib().isoformat(),
+                    "date_utc": now_utc().isoformat(),
                 })
-                logger.info(f"📅 Monthly reset: ${balance:.4f}")
+                logger.info(
+                    f"📅 Monthly reset: ${balance:.4f} | {wib_str()}"
+                )
         except Exception as e:
             logger.error(f"❌ Monthly reset error: {e}")
 
@@ -809,7 +899,9 @@ class VortexBot:
             f"   Exchange : {EXCHANGE_NAME}\n"
             f"   Pairs    : {', '.join(self.pairs)}\n"
             f"   Interval : 60s\n"
-            f"   Min score: {cfg.MIN_CONFLUENCE_SCORE}/16"
+            f"   Min score: {cfg.MIN_CONFLUENCE_SCORE}/16\n"
+            f"   Time WIB : {wib_str()}\n"
+            f"   Time UTC : {utc_str()}"
         )
 
         while self.running:
@@ -821,7 +913,8 @@ class VortexBot:
                     logger.info(
                         f"⏸️ Bot paused | "
                         f"{pause.get('reason')} | "
-                        f"Resume: {pause.get('time_left')}"
+                        f"Resume: {pause.get('time_left')} | "
+                        f"{wib_str()}"
                     )
                     time.sleep(300)
                     continue
@@ -836,13 +929,13 @@ class VortexBot:
                         self.execute_trade(signal)
                     time.sleep(2)
 
-                from datetime import timezone
-                now_utc = datetime.now(timezone.utc)
-                wib_h   = (now_utc.hour + 7) % 24
-                wib_m   = now_utc.minute
+                # ── Log scan result — WIB sebagai primary display ─────────────
+                t_wib = now_wib()
+                t_utc = now_utc()
                 logger.info(
                     f"✅ Scan done | "
-                    f"{wib_h:02d}:{wib_m:02d} WIB | "
+                    f"{t_wib.strftime('%H:%M')} WIB | "
+                    f"{t_utc.strftime('%H:%M')} UTC | "
                     f"Signals: {signals_found} | "
                     f"Trades: {len(self.open_trades)}"
                 )

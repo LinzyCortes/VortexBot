@@ -697,45 +697,59 @@ class VortexBot:
     # WIB 00:01 → UTC 17:01 (hari sebelumnya)
     # WIB 10:00 → UTC 03:00
     # WIB 15:00 → UTC 08:00
-    # WIB 16:30 → UTC 09:30
-    # WIB 14:00 → UTC 07:00
-    # WIB 15:00 → UTC 08:00
+    # ─────────────────────────────────────────────────────────────────────────
+    # KONVERSI JAM: Railway jalan di UTC. Rumus → UTC = WIB - 7 jam
+    #
+    # Checklist harian lo:
+    #   07:00 WIB  Morning Briefing      → UTC 00:00
+    #   13:45 WIB  Pre-London (log only) → UTC 06:45
+    #   17:00 WIB  London Summary        → UTC 10:00
+    #   22:00 WIB  Daily Summary         → UTC 15:00
+    #   23:00 WIB  NY Summary            → UTC 16:00
+    #
+    # Weekly:
+    #   Minggu 14:00 WIB  Weekly Summary     → UTC 07:00
+    #   Minggu 15:00 WIB  Weekly Evaluation  → UTC 08:00
+    #   Senin  00:01 WIB  Weekly Reset       → Minggu UTC 17:01
+    #
+    # Monthly:
+    #   Tgl 1, 00:01 WIB  Monthly Reset      → UTC 17:01 hari sebelumnya
     # ═════════════════════════════════════════════════════════════════════════
 
     def setup_scheduled_tasks(self):
-        # Morning briefing  → WIB 00:00 = UTC 17:00
-        schedule.every().day.at("17:00").do(self._morning_briefing)
+        # Morning briefing  → 07:00 WIB = 00:00 UTC
+        schedule.every().day.at("00:00").do(self._morning_briefing)
 
-        # Daily summary     → WIB 15:00 = UTC 08:00
-        schedule.every().day.at("08:00").do(self._daily_summary)
+        # London session summary → 17:00 WIB = 10:00 UTC
+        schedule.every().day.at("10:00").do(self._london_session_summary)
 
-        # Health check      → setiap 6 jam (tidak perlu konversi)
+        # Daily summary → 22:00 WIB = 15:00 UTC
+        schedule.every().day.at("15:00").do(self._daily_summary)
+
+        # NY session summary → 23:00 WIB = 16:00 UTC
+        schedule.every().day.at("16:00").do(self._ny_session_summary)
+
+        # Health check → setiap 6 jam (tidak perlu konversi)
         schedule.every(6).hours.do(self._health_check)
 
-        # Weekly summary    → WIB Minggu 14:00 = UTC Minggu 07:00
+        # Weekly summary    → Minggu 14:00 WIB = Minggu 07:00 UTC
         schedule.every().sunday.at("07:00").do(self._weekly_summary)
 
-        # Weekly evaluation → WIB Minggu 15:00 = UTC Minggu 08:00
+        # Weekly evaluation → Minggu 15:00 WIB = Minggu 08:00 UTC
         schedule.every().sunday.at("08:00").do(self._run_weekly_evaluation)
 
-        # London session summary → WIB 10:00 = UTC 03:00
-        schedule.every().day.at("03:00").do(self._london_session_summary)
-
-        # NY session summary     → WIB 16:30 = UTC 09:30
-        schedule.every().day.at("09:30").do(self._ny_session_summary)
-
-        # Reset weekly balance   → WIB Senin 00:01 = UTC Minggu 17:01
+        # Reset weekly balance → Senin 00:01 WIB = Minggu 17:01 UTC
         schedule.every().sunday.at("17:01").do(self._reset_weekly_balance)
 
-        # Monthly reset check    → WIB 00:01 = UTC 17:01 (hari sebelumnya)
+        # Monthly reset → tgl 1, 00:01 WIB = UTC 17:01 hari sebelumnya
         schedule.every().day.at("17:01").do(self._check_monthly_reset)
 
         logger.info(
             "📅 Scheduled tasks configured! (Jadwal dalam UTC, tampil WIB)\n"
-            "   Morning briefing  : 00:00 WIB (17:00 UTC)\n"
-            "   Daily summary     : 15:00 WIB (08:00 UTC)\n"
-            "   London summary    : 10:00 WIB (03:00 UTC)\n"
-            "   NY summary        : 16:30 WIB (09:30 UTC)\n"
+            "   Morning briefing  : 07:00 WIB (00:00 UTC)\n"
+            "   London summary    : 17:00 WIB (10:00 UTC)\n"
+            "   Daily summary     : 22:00 WIB (15:00 UTC)\n"
+            "   NY summary        : 23:00 WIB (16:00 UTC)\n"
             "   Weekly summary    : Minggu 14:00 WIB (07:00 UTC)\n"
             "   Weekly evaluation : Minggu 15:00 WIB (08:00 UTC)\n"
             "   Weekly reset      : Senin 00:01 WIB (Minggu 17:01 UTC)\n"

@@ -19,15 +19,13 @@ from risk.management import risk_manager
 from notification.telegram import telegram
 from learning.evaluator import evaluator
 
-# ─── Dynamic Exchange Import ─────────────────
+# ─── Dynamic Exchange Import ─────────────────────────────────────────────────
 if cfg.IS_OKX:
     from exchange.okx import okx as exchange
     EXCHANGE_NAME = "OKX Demo" if cfg.IS_OKX_DEMO else "OKX Live"
 else:
     from exchange.bybit import bybit as exchange
-    EXCHANGE_NAME = (
-        "Bybit Testnet" if cfg.IS_TESTNET else "Bybit Live"
-    )
+    EXCHANGE_NAME = "Bybit Testnet" if cfg.IS_TESTNET else "Bybit Live"
 
 
 class VortexBot:
@@ -48,21 +46,17 @@ class VortexBot:
             f"{'='*45}"
         )
 
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # STARTUP
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     def startup(self) -> bool:
         """Inisialisasi bot"""
-        logger.info(
-            f"🚀 Starting VΦrtex Bot on {EXCHANGE_NAME}..."
-        )
+        logger.info(f"🚀 Starting VΦrtex Bot on {EXCHANGE_NAME}...")
 
         # 1. Test koneksi exchange
         if not exchange.is_connected():
-            logger.error(
-                f"❌ Cannot connect to {EXCHANGE_NAME}!"
-            )
+            logger.error(f"❌ Cannot connect to {EXCHANGE_NAME}!")
             return False
         logger.info(f"✅ {EXCHANGE_NAME} connected!")
 
@@ -91,6 +85,10 @@ class VortexBot:
         # 5. Send startup notification
         telegram.send_bot_started(balance)
 
+        # Start Telegram command listener
+        telegram.start_polling(bot_ref=self)
+        logger.info("📱 Telegram commands active!")
+
         # 6. Set running
         self.running    = True
         self.start_time = datetime.now()
@@ -118,16 +116,16 @@ class VortexBot:
                 "date"   : datetime.now().isoformat(),
             })
 
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # MAIN ANALYSIS ENGINE
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     def analyze_pair(self, pair: str) -> dict:
         """Full analysis untuk 1 pair"""
         try:
             logger.info(f"🔍 Analyzing {pair}...")
 
-            # ── STEP 1: FILTERS ──────────────
+            # ── STEP 1: FILTERS ──────────────────────────────────────────────
             session_info = session_filter.get_session_info()
 
             if session_info.get("should_avoid"):
@@ -149,51 +147,36 @@ class VortexBot:
 
             news_status = news_filter.is_safe_to_trade()
             if not news_status.get("is_safe"):
-                logger.warning(
-                    f"⚠️ Skip {pair}: High impact news!"
-                )
+                logger.warning(f"⚠️ Skip {pair}: High impact news!")
                 return {}
 
-            # ── STEP 2: FETCH DATA ────────────
-            ohlcv_4h  = exchange.get_ohlcv(
-                pair, cfg.TF_BIAS,  limit=200
-            )
-            ohlcv_1h  = exchange.get_ohlcv(
-                pair, cfg.TF_SETUP, limit=200
-            )
-            ohlcv_15m = exchange.get_ohlcv(
-                pair, cfg.TF_ENTRY, limit=200
-            )
-            ohlcv_1d  = exchange.get_ohlcv(
-                pair, "1D", limit=200
-            )
+            # ── STEP 2: FETCH DATA ───────────────────────────────────────────
+            ohlcv_4h  = exchange.get_ohlcv(pair, cfg.TF_BIAS,  limit=200)
+            ohlcv_1h  = exchange.get_ohlcv(pair, cfg.TF_SETUP, limit=200)
+            ohlcv_15m = exchange.get_ohlcv(pair, cfg.TF_ENTRY, limit=200)
+            ohlcv_1d  = exchange.get_ohlcv(pair, "1D",         limit=200)
 
             if not all([ohlcv_4h, ohlcv_1h, ohlcv_15m]):
-                logger.warning(
-                    f"⚠️ Incomplete data for {pair}"
-                )
+                logger.warning(f"⚠️ Incomplete data for {pair}")
                 return {}
 
             df_4h  = indicators.ohlcv_to_df(ohlcv_4h)
             df_1h  = indicators.ohlcv_to_df(ohlcv_1h)
             df_15m = indicators.ohlcv_to_df(ohlcv_15m)
-            df_1d  = indicators.ohlcv_to_df(ohlcv_1d) \
-                     if ohlcv_1d else df_4h
+            df_1d  = indicators.ohlcv_to_df(ohlcv_1d) if ohlcv_1d else df_4h
 
             if any(df.empty for df in [df_4h, df_1h, df_15m]):
-                logger.warning(
-                    f"⚠️ Empty DataFrame for {pair}"
-                )
+                logger.warning(f"⚠️ Empty DataFrame for {pair}")
                 return {}
 
-            # ── STEP 3: INDICATORS ────────────
+            # ── STEP 3: INDICATORS ───────────────────────────────────────────
             ind_15m = indicators.calculate_all(df_15m)
             ind_1h  = indicators.calculate_all(df_1h)
 
             if not ind_15m or not ind_1h:
                 return {}
 
-            # ── STEP 4: SMC ───────────────────
+            # ── STEP 4: SMC ──────────────────────────────────────────────────
             smc_result = smc.analyze(df_4h, df_1h, df_15m)
 
             if not smc_result.get("valid"):
@@ -207,7 +190,7 @@ class VortexBot:
             if not direction:
                 return {}
 
-            # ── STEP 5: FIBONACCI ─────────────
+            # ── STEP 5: FIBONACCI ────────────────────────────────────────────
             current_price = df_15m["close"].iloc[-1]
             atr_val       = ind_15m.get("atr", 0)
 
@@ -229,7 +212,7 @@ class VortexBot:
             if not fib_result.get("valid"):
                 return {}
 
-            # ── STEP 6: CONFLUENCE ────────────
+            # ── STEP 6: CONFLUENCE ───────────────────────────────────────────
             score_result = confluence_scorer.calculate(
                 direction   =direction,
                 indicators  =ind_15m,
@@ -251,7 +234,7 @@ class VortexBot:
             if not is_valid:
                 return {}
 
-            # ── STEP 7: BUILD SIGNAL ──────────
+            # ── STEP 7: BUILD SIGNAL ─────────────────────────────────────────
             tp_sl = fib_result.get("tp_sl", {})
             if not tp_sl:
                 return {}
@@ -273,28 +256,16 @@ class VortexBot:
                 "rr_ratio"        : rr2,
                 "fib_level"       : fib_result.get("fib_level"),
                 "fib_strength"    : fib_result.get("fib_strength"),
-                "session"         : session_info.get(
-                    "session_name", "Unknown"
-                ),
+                "session"         : session_info.get("session_name", "Unknown"),
                 "killzone"        : killzone.get("session", ""),
                 "rsi_value"       : ind_15m.get("rsi", 0),
                 "adx_value"       : ind_15m.get("adx", 0),
                 "atr_value"       : atr_val,
-                "macd_histogram"  : ind_15m.get(
-                    "macd_histogram", 0
-                ),
-                "volume_ratio"    : ind_15m.get(
-                    "volume_ratio", 0
-                ),
-                "candle_pattern"  : ind_15m.get(
-                    "candle_pattern", []
-                ),
-                "candle_direction": ind_15m.get(
-                    "candle_direction"
-                ),
-                "structure_4h"    : smc_result.get(
-                    "structure_4h"
-                ),
+                "macd_histogram"  : ind_15m.get("macd_histogram", 0),
+                "volume_ratio"    : ind_15m.get("volume_ratio", 0),
+                "candle_pattern"  : ind_15m.get("candle_pattern", []),
+                "candle_direction": ind_15m.get("candle_direction"),
+                "structure_4h"    : smc_result.get("structure_4h"),
                 "bos_detected"    : (
                     smc_result.get("bos_4h") or
                     smc_result.get("bos_1h", False)
@@ -303,25 +274,13 @@ class VortexBot:
                     smc_result.get("choch_4h") or
                     smc_result.get("choch_1h", False)
                 ),
-                "ob_detected"     : smc_result.get(
-                    "in_ob", False
-                ),
+                "ob_detected"     : smc_result.get("in_ob", False),
                 "ob_type"         : smc_result.get("ob_type"),
-                "fvg_detected"    : smc_result.get(
-                    "in_fvg", False
-                ),
-                "liquidity_swept" : smc_result.get(
-                    "liquidity_swept", False
-                ),
-                "ideal_zone"      : smc_result.get(
-                    "ideal_zone", False
-                ),
-                "score_breakdown" : score_result.get(
-                    "breakdown", {}
-                ),
-                "top_reasons"     : score_result.get(
-                    "reasons", []
-                )[:8],
+                "fvg_detected"    : smc_result.get("in_fvg", False),
+                "liquidity_swept" : smc_result.get("liquidity_swept", False),
+                "ideal_zone"      : smc_result.get("ideal_zone", False),
+                "score_breakdown" : score_result.get("breakdown", {}),
+                "top_reasons"     : score_result.get("reasons", [])[:8],
                 "tf_bias"         : cfg.TF_BIAS,
                 "tf_setup"        : cfg.TF_SETUP,
                 "tf_entry"        : cfg.TF_ENTRY,
@@ -344,9 +303,9 @@ class VortexBot:
             logger.error(f"❌ Analyze {pair} error: {e}")
             return {}
 
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # TRADE EXECUTION
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     def execute_trade(self, signal: dict):
         """Eksekusi trade"""
@@ -359,7 +318,7 @@ class VortexBot:
             tp2       = signal.get("tp2_price")
             tp3       = signal.get("tp3_price")
 
-            # ── Risk check ───────────────────
+            # ── Risk check ───────────────────────────────────────────────────
             balance    = exchange.get_balance().get("free", 0)
             risk_check = risk_manager.full_risk_check(balance)
 
@@ -370,20 +329,18 @@ class VortexBot:
                 )
                 return
 
-            # ── Max trades check ─────────────
+            # ── Max trades check ─────────────────────────────────────────────
             cap_mode   = cfg.get_capital_mode(balance)
             max_trades = cap_mode.get("max_open_trades", 1)
             if len(self.open_trades) >= max_trades:
-                logger.info(
-                    f"⏭️ Max trades ({max_trades}) reached"
-                )
+                logger.info(f"⏭️ Max trades ({max_trades}) reached")
                 return
 
-            # ── Position sizing ──────────────
+            # ── Position sizing ──────────────────────────────────────────────
             position = risk_manager.calculate_position(
-                balance     =balance,
-                entry_price =entry,
-                sl_price    =sl,
+                balance    =balance,
+                entry_price=entry,
+                sl_price   =sl,
             )
             if not position:
                 return
@@ -397,24 +354,22 @@ class VortexBot:
                 logger.warning("⚠️ Quantity = 0 — skip")
                 return
 
-            # ── Set leverage ─────────────────
+            # ── Set leverage ─────────────────────────────────────────────────
             exchange.set_leverage(pair, leverage)
 
-            # ── Place order ──────────────────
+            # ── Place order ──────────────────────────────────────────────────
             side  = "buy" if direction == "BUY" else "sell"
-            order = exchange.place_market_order(
-                pair, side, quantity
-            )
+            order = exchange.place_market_order(pair, side, quantity)
             if not order:
                 logger.error(f"❌ Order failed: {pair}")
                 return
 
-            # ── Place SL & TP ────────────────
+            # ── Place SL & TP ────────────────────────────────────────────────
             exchange.place_stop_loss(pair, side, quantity, sl)
             tp_qty = round(quantity * 0.4, 6)
             exchange.place_take_profit(pair, side, tp_qty, tp2)
 
-            # ── Save trade ───────────────────
+            # ── Save trade ───────────────────────────────────────────────────
             trade_data = {
                 "pair"            : pair,
                 "direction"       : direction,
@@ -425,13 +380,9 @@ class VortexBot:
                 "tp3_price"       : tp3,
                 "size"            : quantity,
                 "leverage"        : leverage,
-                "confluence_score": signal.get(
-                    "confluence_score"
-                ),
+                "confluence_score": signal.get("confluence_score"),
                 "mode"            : mode,
-                "position_usdt"   : position.get(
-                    "position_usdt", 0
-                ),
+                "position_usdt"   : position.get("position_usdt", 0),
                 "risk_amount"     : risk_amt,
             }
             trade_id = db.save_trade(trade_data)
@@ -445,7 +396,7 @@ class VortexBot:
                 "original_qty"      : quantity,
             }
 
-            # ── Auto journal + Kirim ke Telegram ──
+            # ── Auto journal + Kirim ke Telegram ─────────────────────────────
             entry_reason = journal.generate_entry_reason({
                 **signal,
                 "entry_price"    : entry,
@@ -454,25 +405,23 @@ class VortexBot:
                 "tp2_price"      : tp2,
                 "tp3_price"      : tp3,
                 "rr_ratio"       : signal.get("rr_ratio", 3),
-                "score_breakdown": signal.get(
-                    "score_breakdown", {}
-                ),
+                "score_breakdown": signal.get("score_breakdown", {}),
             })
 
-            # Simpan ke file (kalau bisa)
+            # Simpan ke file
             journal.save_trade_journal(trade_id, entry_reason)
 
-            # Kirim jurnal entry ke Telegram ← BARU!
-            journal.send_entry_journal_to_telegram(
-                trade_id, signal, entry_reason
-            )
+            # Update virtual balance (reserve)
+            if cfg.IS_OKX and cfg.IS_OKX_DEMO:
+                risk_manager.reserve_balance(position.get("risk_amount", 0))
+
+            # Kirim jurnal entry ke Telegram
+            journal.send_entry_journal_to_telegram(trade_id, signal, entry_reason)
 
             # Kirim notif trade opened
             telegram.send_trade_opened({
                 **trade_data,
-                "confluence_score": signal.get(
-                    "confluence_score"
-                ),
+                "confluence_score": signal.get("confluence_score"),
             })
 
             logger.info(
@@ -485,9 +434,9 @@ class VortexBot:
         except Exception as e:
             logger.error(f"❌ Execute trade error: {e}")
 
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # TRADE MONITORING
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     def monitor_trades(self):
         """Monitor open trades"""
@@ -495,9 +444,7 @@ class VortexBot:
             return
 
         try:
-            for trade_id, trade in list(
-                self.open_trades.items()
-            ):
+            for trade_id, trade in list(self.open_trades.items()):
                 pair       = trade.get("pair")
                 direction  = trade.get("direction")
                 entry      = trade.get("entry_price")
@@ -512,9 +459,7 @@ class VortexBot:
                 if not current:
                     continue
 
-                ohlcv_15m = exchange.get_ohlcv(
-                    pair, cfg.TF_ENTRY, limit=30
-                )
+                ohlcv_15m = exchange.get_ohlcv(pair, cfg.TF_ENTRY, limit=30)
                 atr = 0
                 if ohlcv_15m:
                     df_15m = indicators.ohlcv_to_df(ohlcv_15m)
@@ -523,11 +468,11 @@ class VortexBot:
 
                 # Partial close
                 partial = risk_manager.should_partial_close(
-                    entry     =entry,
-                    current   =current,
-                    tp1       =tp1,
-                    tp2       =tp2,
-                    direction =direction,
+                    entry    =entry,
+                    current  =current,
+                    tp1      =tp1,
+                    tp2      =tp2,
+                    direction=direction,
                     closed_tp1=tp1_closed,
                 )
                 if partial.get("should_close"):
@@ -538,9 +483,7 @@ class VortexBot:
 
                 # Trailing stop
                 if tp1_closed and atr > 0:
-                    self._handle_trailing_stop(
-                        trade_id, trade, current, atr
-                    )
+                    self._handle_trailing_stop(trade_id, trade, current, atr)
 
                 # SL check
                 sl_hit = (
@@ -548,9 +491,7 @@ class VortexBot:
                     (direction == "SELL" and current >= sl)
                 )
                 if sl_hit:
-                    self._close_trade(
-                        trade_id, trade, current, "SL"
-                    )
+                    self._close_trade(trade_id, trade, current, "SL")
 
         except Exception as e:
             logger.error(f"❌ Monitor trades error: {e}")
@@ -577,17 +518,13 @@ class VortexBot:
 
             remaining = qty - close_qty
             if remaining > 0:
-                exchange.place_stop_loss(
-                    pair, direction, remaining, new_sl
-                )
+                exchange.place_stop_loss(pair, direction, remaining, new_sl)
 
             self.open_trades[trade_id]["tp1_closed"]         = True
             self.open_trades[trade_id]["quantity_remaining"] = remaining
             self.open_trades[trade_id]["sl_price"]           = new_sl
 
-            telegram.send_partial_close(
-                trade, tp_hit, close_pct, pnl
-            )
+            telegram.send_partial_close(trade, tp_hit, close_pct, pnl)
             logger.info(
                 f"🎯 Partial close: {pair} {tp_hit} "
                 f"pnl=+{pnl:.4f}"
@@ -595,8 +532,7 @@ class VortexBot:
         except Exception as e:
             logger.error(f"❌ Partial close error: {e}")
 
-    def _handle_trailing_stop(self, trade_id, trade,
-                               current, atr):
+    def _handle_trailing_stop(self, trade_id, trade, current, atr):
         try:
             direction = trade.get("direction")
             entry     = trade.get("entry_price")
@@ -605,8 +541,11 @@ class VortexBot:
             pair      = trade.get("pair")
 
             trail = risk_manager.calculate_trailing_stop(
-                entry=entry, current=current,
-                sl=sl, direction=direction, atr=atr,
+                entry    =entry,
+                current  =current,
+                sl       =sl,
+                direction=direction,
+                atr      =atr,
             )
             if not trail.get("active"):
                 return
@@ -620,9 +559,7 @@ class VortexBot:
 
             if improved and new_sl != old_sl:
                 exchange.cancel_all_orders(pair)
-                exchange.place_stop_loss(
-                    pair, direction, qty, new_sl
-                )
+                exchange.place_stop_loss(pair, direction, qty, new_sl)
                 self.open_trades[trade_id]["sl_price"] = new_sl
                 logger.info(
                     f"🔄 Trailing: {pair} SL "
@@ -631,8 +568,7 @@ class VortexBot:
         except Exception as e:
             logger.error(f"❌ Trailing stop error: {e}")
 
-    def _close_trade(self, trade_id, trade,
-                     close_price, reason):
+    def _close_trade(self, trade_id, trade, close_price, reason):
         try:
             pair      = trade.get("pair")
             direction = trade.get("direction")
@@ -650,12 +586,9 @@ class VortexBot:
                 (datetime.now() - open_time).seconds / 60
             ) if isinstance(open_time, datetime) else 0
 
-            sl    = trade.get("sl_price", entry)
-            risk  = abs(entry - sl)
-            rr    = (
-                abs(close_price - entry) / risk
-                if risk > 0 else 0
-            )
+            sl   = trade.get("sl_price", entry)
+            risk = abs(entry - sl)
+            rr   = abs(close_price - entry) / risk if risk > 0 else 0
 
             exchange.cancel_all_orders(pair)
             if reason not in ["TP2", "TP3"]:
@@ -674,20 +607,26 @@ class VortexBot:
             }
             db.close_trade(trade_id, close_data)
 
-            # ── Auto journal close + Kirim ke Telegram ──
-            close_text = journal.generate_close_reason(
-                trade, close_data
-            )
+            # Compound virtual balance
+            if cfg.IS_OKX and cfg.IS_OKX_DEMO:
+                new_bal = risk_manager.update_virtual_balance_after_trade(pnl)
+                risk_manager.release_balance(trade.get("risk_amount", 0))
+
+                # Update OKX virtual balance
+                from exchange.okx import okx
+                okx._virtual_balance   = new_bal
+                close_data["new_balance"] = new_bal
+
+            # ── Auto journal close + Kirim ke Telegram ────────────────────────
+            close_text = journal.generate_close_reason(trade, close_data)
             journal.save_trade_journal(
                 trade_id,
                 "→ See entry journal",
                 close_text
             )
 
-            # Kirim close journal ke Telegram ← BARU!
-            journal.send_close_journal_to_telegram(
-                trade_id, close_text, pnl
-            )
+            # Kirim close journal ke Telegram
+            journal.send_close_journal_to_telegram(trade_id, close_text, pnl)
 
             risk_manager.record_trade_result(pnl > 0)
             telegram.send_trade_closed(
@@ -708,54 +647,32 @@ class VortexBot:
         except Exception as e:
             logger.error(f"❌ Close trade error: {e}")
 
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # SCHEDULED TASKS
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     def setup_scheduled_tasks(self):
-        schedule.every().day.at("00:00").do(
-            self._morning_briefing
-        )
-        schedule.every().day.at("15:00").do(
-            self._daily_summary
-        )
+        schedule.every().day.at("00:00").do(self._morning_briefing)
+        schedule.every().day.at("15:00").do(self._daily_summary)
         schedule.every(6).hours.do(self._health_check)
-        schedule.every().sunday.at("14:00").do(
-            self._weekly_summary
-        )
-        schedule.every().sunday.at("15:00").do(
-            self._run_weekly_evaluation
-        )
-        schedule.every().day.at("10:00").do(
-            self._london_session_summary
-        )
-        schedule.every().day.at("16:30").do(
-            self._ny_session_summary
-        )
-        schedule.every().monday.at("00:01").do(
-            self._reset_weekly_balance
-        )
-        schedule.every().day.at("00:01").do(
-            self._check_monthly_reset
-        )
+        schedule.every().sunday.at("14:00").do(self._weekly_summary)
+        schedule.every().sunday.at("15:00").do(self._run_weekly_evaluation)
+        schedule.every().day.at("10:00").do(self._london_session_summary)
+        schedule.every().day.at("16:30").do(self._ny_session_summary)
+        schedule.every().monday.at("00:01").do(self._reset_weekly_balance)
+        schedule.every().day.at("00:01").do(self._check_monthly_reset)
         logger.info("📅 Scheduled tasks configured!")
 
     def _morning_briefing(self):
         try:
             balance  = exchange.get_balance().get("free", 0)
-            upcoming = news_filter.get_upcoming_news(
-                hours_ahead=12
+            upcoming = news_filter.get_upcoming_news(hours_ahead=12)
+            ohlcv_1d = exchange.get_ohlcv(self.pairs[0], "1D", limit=200)
+            df_1d    = indicators.ohlcv_to_df(ohlcv_1d)
+            regime   = risk_manager.detect_market_regime(df_1d).get(
+                "regime", "UNKNOWN"
             )
-            ohlcv_1d = exchange.get_ohlcv(
-                self.pairs[0], "1D", limit=200
-            )
-            df_1d  = indicators.ohlcv_to_df(ohlcv_1d)
-            regime = risk_manager.detect_market_regime(
-                df_1d
-            ).get("regime", "UNKNOWN")
-            telegram.send_morning_briefing(
-                balance, upcoming, regime
-            )
+            telegram.send_morning_briefing(balance, upcoming, regime)
             logger.info("☀️ Morning briefing sent!")
         except Exception as e:
             logger.error(f"❌ Morning briefing error: {e}")
@@ -764,12 +681,8 @@ class VortexBot:
         try:
             trades    = db.get_today_trades()
             balance   = exchange.get_balance().get("free", 0)
-            wins      = sum(
-                1 for t in trades if t.get("pnl", 0) > 0
-            )
-            losses    = sum(
-                1 for t in trades if t.get("pnl", 0) < 0
-            )
+            wins      = sum(1 for t in trades if t.get("pnl", 0) > 0)
+            losses    = sum(1 for t in trades if t.get("pnl", 0) < 0)
             total_pnl = sum(t.get("pnl", 0) for t in trades)
             db.save_daily_summary({
                 "total_trades"  : len(trades),
@@ -797,21 +710,15 @@ class VortexBot:
                 if self.start_time else 0
             )
             balance = exchange.get_balance().get("free", 0)
-            telegram.send_health_check(
-                uptime, balance, len(self.open_trades)
-            )
-            logger.info(
-                f"💚 Health check: {uptime:.1f}h"
-            )
+            telegram.send_health_check(uptime, balance, len(self.open_trades))
+            logger.info(f"💚 Health check: {uptime:.1f}h")
         except Exception as e:
             logger.error(f"❌ Health check error: {e}")
 
     def _weekly_summary(self):
         try:
             stats            = db.get_overall_stats()
-            stats["balance"] = exchange.get_balance().get(
-                "free", 0
-            )
+            stats["balance"] = exchange.get_balance().get("free", 0)
             telegram.send_weekly_summary(stats)
             logger.info("📈 Weekly summary sent!")
         except Exception as e:
@@ -835,8 +742,7 @@ class VortexBot:
             trades  = db.get_today_trades()
             summary = evaluator.create_session_summary(
                 "London Killzone", trades,
-                {"regime": "N/A", "btc_trend": "N/A",
-                 "volatility": "N/A"}
+                {"regime": "N/A", "btc_trend": "N/A", "volatility": "N/A"}
             )
             if summary and trades:
                 telegram.send(
@@ -852,8 +758,7 @@ class VortexBot:
             trades  = db.get_today_trades()
             summary = evaluator.create_session_summary(
                 "New York Killzone", trades,
-                {"regime": "N/A", "btc_trend": "N/A",
-                 "volatility": "N/A"}
+                {"regime": "N/A", "btc_trend": "N/A", "volatility": "N/A"}
             )
             if summary and trades:
                 telegram.send(
@@ -871,9 +776,7 @@ class VortexBot:
                 "balance": balance,
                 "date"   : datetime.now().isoformat(),
             })
-            logger.info(
-                f"📅 Weekly reset: ${balance:.4f}"
-            )
+            logger.info(f"📅 Weekly reset: ${balance:.4f}")
         except Exception as e:
             logger.error(f"❌ Weekly reset error: {e}")
 
@@ -885,15 +788,13 @@ class VortexBot:
                     "balance": balance,
                     "date"   : datetime.now().isoformat(),
                 })
-                logger.info(
-                    f"📅 Monthly reset: ${balance:.4f}"
-                )
+                logger.info(f"📅 Monthly reset: ${balance:.4f}")
         except Exception as e:
             logger.error(f"❌ Monthly reset error: {e}")
 
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # MAIN LOOP
-    # ════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     def run(self):
         """Main loop VΦrtex Bot"""
@@ -935,8 +836,10 @@ class VortexBot:
                         self.execute_trade(signal)
                     time.sleep(2)
 
-                wib_h = (datetime.utcnow().hour + 7) % 24
-                wib_m = datetime.utcnow().minute
+                from datetime import timezone
+                now_utc = datetime.now(timezone.utc)
+                wib_h   = (now_utc.hour + 7) % 24
+                wib_m   = now_utc.minute
                 logger.info(
                     f"✅ Scan done | "
                     f"{wib_h:02d}:{wib_m:02d} WIB | "
@@ -949,9 +852,7 @@ class VortexBot:
             except KeyboardInterrupt:
                 logger.info("🛑 Bot stopped (Ctrl+C)")
                 self.running = False
-                telegram.send_bot_stopped(
-                    "Manual stop (Ctrl+C)"
-                )
+                telegram.send_bot_stopped("Manual stop (Ctrl+C)")
                 break
 
             except Exception as e:
@@ -961,9 +862,9 @@ class VortexBot:
         logger.info("👋 VΦrtex Bot shutdown complete!")
 
 
-# ════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
-# ════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     print("""

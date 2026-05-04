@@ -45,9 +45,7 @@ class Config:
     CAPITAL            = float(os.getenv("CAPITAL", 10))
     RISK_PERCENT       = float(os.getenv("RISK_PERCENT", 1.0))
     MAX_LEVERAGE       = int(os.getenv("MAX_LEVERAGE", 5))
-    MAX_DAILY_LOSS_PCT = float(
-        os.getenv("MAX_DAILY_LOSS_PERCENT", 5.0)
-    )
+    MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PERCENT", 5.0))
 
     # ─── CAPITAL MODE ───────────────────────
     @staticmethod
@@ -87,8 +85,11 @@ class Config:
     TF_ENTRY = os.getenv("TF_ENTRY", "15m")
 
     # ─── CONFLUENCE ─────────────────────────
+    # PENTING: Ubah nilai ini di Railway Variables Panel
+    # Jangan ubah default di sini saja!
+    # Railway: Settings → Variables → MIN_CONFLUENCE_SCORE = 7
     MIN_CONFLUENCE_SCORE = int(
-        os.getenv("MIN_CONFLUENCE_SCORE", 11)
+        os.getenv("MIN_CONFLUENCE_SCORE", 7)
     )
 
     # ─── FIBONACCI ──────────────────────────
@@ -112,13 +113,16 @@ class Config:
     TP3_RATIO = 2.618
 
     # ─── KILLZONE (WIB) ─────────────────────
+    # Sinkron dengan SessionFilter di news_filter.py
+    # London : 15:00 – 17:30 WIB
+    # NY     : 20:30 – 23:00 WIB
     KILLZONES = {
         "london": {
-            "open" : os.getenv("LONDON_OPEN",  "14:00"),
-            "close": os.getenv("LONDON_CLOSE", "17:00"),
+            "open" : os.getenv("LONDON_OPEN",  "15:00"),
+            "close": os.getenv("LONDON_CLOSE", "17:30"),
         },
         "new_york": {
-            "open" : os.getenv("NY_OPEN",  "19:30"),
+            "open" : os.getenv("NY_OPEN",  "20:30"),
             "close": os.getenv("NY_CLOSE", "23:00"),
         },
     }

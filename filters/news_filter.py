@@ -27,14 +27,11 @@ class NewsFilter:
     def _fetch_news(self) -> list:
         """Fetch news dengan multiple URL fallback"""
         try:
-            # Pakai cache kalau masih valid
             if (self.cache and self.cache_time and
                     (datetime.now() -
                      self.cache_time).seconds < self.cache_expiry):
                 return self.cache
 
-            # Kalau sudah terlalu banyak gagal →
-            # return cache lama atau empty
             if self.fail_count >= self.max_fails:
                 logger.debug(
                     "📰 News fetch skipped (too many fails) "
@@ -42,7 +39,6 @@ class NewsFilter:
                 )
                 return self.cache or []
 
-            # Coba semua URL
             for url in self.urls:
                 try:
                     resp = requests.get(url, timeout=8)
@@ -60,7 +56,6 @@ class NewsFilter:
                 except Exception:
                     continue
 
-            # Semua URL gagal
             self.fail_count += 1
             logger.warning(
                 f"⚠️ News fetch failed "
@@ -78,14 +73,11 @@ class NewsFilter:
         """Cek apakah aman trading (pakai UTC untuk compare news time)"""
         try:
             news_list   = self._fetch_news()
-            # News API pakai UTC — tetap pakai UTC untuk komparasi
             now_utc     = datetime.now(UTC).replace(tzinfo=None)
             unsafe_news = []
 
             for news in news_list:
-                impact = str(
-                    news.get("impact", "")
-                ).lower()
+                impact = str(news.get("impact", "")).lower()
                 if impact != "high":
                     continue
 
@@ -132,7 +124,6 @@ class NewsFilter:
 
         except Exception as e:
             logger.error(f"❌ News check error: {e}")
-            # Default AMAN kalau error
             return {"is_safe": True, "unsafe_news": []}
 
     def get_upcoming_news(self,
@@ -144,9 +135,7 @@ class NewsFilter:
             upcoming  = []
 
             for news in news_list:
-                impact = str(
-                    news.get("impact", "")
-                ).lower()
+                impact = str(news.get("impact", "")).lower()
                 if impact != "high":
                     continue
 
@@ -166,13 +155,10 @@ class NewsFilter:
                     except Exception:
                         continue
 
-                if now_utc <= news_time <= now_utc + timedelta(
-                    hours=hours_ahead
-                ):
+                if now_utc <= news_time <= now_utc + timedelta(hours=hours_ahead):
                     mins_away = int(
                         (news_time - now_utc).total_seconds() / 60
                     )
-                    # Konversi ke WIB untuk display
                     news_wib = news_time + timedelta(hours=7)
                     upcoming.append({
                         "title"       : news.get("title", ""),
@@ -182,9 +168,7 @@ class NewsFilter:
                         "minutes_away": mins_away,
                     })
 
-            return sorted(
-                upcoming, key=lambda x: x["minutes_away"]
-            )
+            return sorted(upcoming, key=lambda x: x["minutes_away"])
 
         except Exception as e:
             logger.error(f"❌ Upcoming news error: {e}")
@@ -193,34 +177,36 @@ class NewsFilter:
 
 class SessionFilter:
     """
-    Semua jam di sini dalam WIB (Asia/Jakarta, UTC+7).
-    Sesuai jadwal trading:
-      - London Killzone   : 14:00 – 17:00 WIB
-      - New York Killzone : 19:30 – 23:00 WIB
-      - Pre-London buffer : 13:45 WIB (15 menit sebelum London)
-      - Pre-NY buffer     : 19:15 WIB (15 menit sebelum NY)
+    Semua jam dalam WIB (Asia/Jakarta, UTC+7).
+
+    ┌─────────────────────────────────────────────────────┐
+    │  Jadwal Killzone (WIB):                             │
+    │  London Killzone   : 15:00 – 17:30 WIB             │
+    │  New York Killzone : 20:30 – 23:00 WIB             │
+    │  Pre-London buffer : 14:45 WIB (15 mnt sebelum)    │
+    │  Pre-NY buffer     : 20:15 WIB (15 mnt sebelum)    │
+    └─────────────────────────────────────────────────────┘
     """
 
     def __init__(self):
         self.sessions = {
             "london": {
-                "open"       : (14,  0),   # 14:00 WIB
-                "close"      : (17,  0),   # 17:00 WIB
-                "pre_open"   : (13, 45),   # Pre-London buffer
-                "name"       : "London Killzone",
-                "pre_name"   : "Pre-London",
+                "open"    : (15,  0),   # 15:00 WIB
+                "close"   : (17, 30),   # 17:30 WIB
+                "pre_open": (14, 45),   # Pre-London buffer
+                "name"    : "London Killzone",
+                "pre_name": "Pre-London",
             },
             "new_york": {
-                "open"       : (19, 30),   # 19:30 WIB
-                "close"      : (23,  0),   # 23:00 WIB
-                "pre_open"   : (19, 15),   # Pre-NY buffer
-                "name"       : "New York Killzone",
-                "pre_name"   : "Pre-NY",
+                "open"    : (20, 30),   # 20:30 WIB
+                "close"   : (23,  0),   # 23:00 WIB
+                "pre_open": (20, 15),   # Pre-NY buffer
+                "name"    : "New York Killzone",
+                "pre_name": "Pre-NY",
             },
         }
 
-        # Waktu yang dihindari (hari pakai WIB)
-        # weekday: 0=Senin, 4=Jumat
+        # Waktu yang dihindari (weekday WIB: 0=Senin, 4=Jumat)
         self.avoid_times = [
             {
                 "day"   : 0,
@@ -237,49 +223,43 @@ class SessionFilter:
         ]
 
     def _now_wib(self):
-        """
-        Waktu sekarang dalam WIB yang akurat.
-        Pakai timezone-aware datetime biar weekday juga benar WIB.
-        """
+        """Waktu sekarang dalam WIB (timezone-aware)"""
         now_wib  = datetime.now(WIB)
         hour_wib = now_wib.hour
         minute   = now_wib.minute
-        weekday  = now_wib.weekday()   # 0=Senin … 6=Minggu, dalam WIB
+        weekday  = now_wib.weekday()  # 0=Senin … 6=Minggu
         return now_wib, hour_wib, minute, weekday
 
     def is_killzone(self) -> dict:
-        """
-        Cek apakah sekarang dalam killzone.
-        Return juga info pre-session (15 menit sebelum buka).
-        """
+        """Cek apakah sekarang dalam killzone"""
         _, hour_wib, minute, _ = self._now_wib()
         now_min = hour_wib * 60 + minute
 
         for key, session in self.sessions.items():
-            open_min    = session["open"][0]  * 60 + session["open"][1]
-            close_min   = session["close"][0] * 60 + session["close"][1]
-            pre_min     = session["pre_open"][0] * 60 + session["pre_open"][1]
+            open_min  = session["open"][0]  * 60 + session["open"][1]
+            close_min = session["close"][0] * 60 + session["close"][1]
+            pre_min   = session["pre_open"][0] * 60 + session["pre_open"][1]
 
             # Dalam killzone aktif
             if open_min <= now_min <= close_min:
                 return {
-                    "in_killzone"  : True,
-                    "session"      : session["name"],
-                    "session_key"  : key,
-                    "minutes_left" : close_min - now_min,
+                    "in_killzone"   : True,
+                    "session"       : session["name"],
+                    "session_key"   : key,
+                    "minutes_left"  : close_min - now_min,
                     "is_pre_session": False,
                 }
 
             # Dalam pre-session buffer
             if pre_min <= now_min < open_min:
                 return {
-                    "in_killzone"   : False,
-                    "session"       : None,
-                    "session_key"   : key,
-                    "is_pre_session": True,
-                    "pre_name"      : session["pre_name"],
+                    "in_killzone"    : False,
+                    "session"        : None,
+                    "session_key"    : key,
+                    "is_pre_session" : True,
+                    "pre_name"       : session["pre_name"],
                     "minutes_to_open": open_min - now_min,
-                    "next_session"  : {
+                    "next_session"   : {
                         "name"        : session["name"],
                         "minutes_away": open_min - now_min,
                     },
@@ -294,7 +274,7 @@ class SessionFilter:
         }
 
     def _get_next_session(self, current_min: int) -> dict:
-        """Hitung sesi killzone berikutnya (dalam WIB menit)"""
+        """Hitung sesi killzone berikutnya"""
         candidates = []
         for key, session in self.sessions.items():
             open_min = session["open"][0] * 60 + session["open"][1]
@@ -306,7 +286,7 @@ class SessionFilter:
         if candidates:
             return min(candidates, key=lambda x: x["minutes_away"])
 
-        # Besok London (14:00 WIB)
+        # Besok London (15:00 WIB)
         london_open = (
             self.sessions["london"]["open"][0] * 60 +
             self.sessions["london"]["open"][1]
@@ -317,7 +297,7 @@ class SessionFilter:
         }
 
     def is_avoid_time(self) -> dict:
-        """Cek waktu yang dihindari — weekday dalam WIB"""
+        """Cek waktu yang dihindari"""
         _, hour_wib, minute, weekday = self._now_wib()
         now_min = hour_wib * 60 + minute
 
@@ -341,18 +321,20 @@ class SessionFilter:
         # Klasifikasi sesi berdasarkan jam WIB
         if 0 <= hour_wib < 7:
             active = "Asia Session (Low Volume)"
-        elif 7 <= hour_wib < 13:
+        elif 7 <= hour_wib < 14:
             active = "Pre-London (Preparation)"
-        elif hour_wib == 13 and minute >= 45:
-            active = "Pre-London Buffer ⏳"      # 13:45–14:00
-        elif 14 <= hour_wib < 17:
-            active = "London Killzone ⚡"
-        elif 17 <= hour_wib < 19:
-            active = "London-NY Overlap"
-        elif hour_wib == 19 and minute < 30:
-            active = "Pre-NY Buffer ⏳"          # 19:00–19:30
-        elif (hour_wib == 19 and minute >= 30) or (20 <= hour_wib < 23):
-            active = "New York Killzone ⚡"
+        elif hour_wib == 14 and minute >= 45:
+            active = "Pre-London Buffer ⏳"      # 14:45–15:00
+        elif (hour_wib == 15) or (hour_wib == 16) or (hour_wib == 17 and minute <= 30):
+            active = "London Killzone ⚡"         # 15:00–17:30
+        elif 17 <= hour_wib < 20:
+            active = "London-NY Gap"
+        elif hour_wib == 20 and minute < 15:
+            active = "Pre-NY Buffer ⏳"           # 20:00–20:15
+        elif hour_wib == 20 and minute >= 15 and minute < 30:
+            active = "Pre-NY Buffer ⏳"           # 20:15–20:30
+        elif (hour_wib == 20 and minute >= 30) or (21 <= hour_wib < 23):
+            active = "New York Killzone ⚡"       # 20:30–23:00
         else:
             active = "Late NY / Pre-Asia"
 

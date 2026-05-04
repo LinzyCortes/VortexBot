@@ -82,7 +82,8 @@ class SMCAnalysis:
             lh = highs[-1]["price"] < highs[-2]["price"]
             ll = lows[-1]["price"]  < lows[-2]["price"]
 
-            # Tentukan struktur
+            # Tentukan struktur dari SWING sebelumnya
+            # (bukan dari current price)
             if hh and hl:
                 structure = "UPTREND"
                 direction = "BUY"
@@ -93,29 +94,30 @@ class SMCAnalysis:
                 structure = "RANGING"
                 direction = None
 
-            # Break of Structure (BOS)
-            # BOS Bullish: harga break above last swing high
-            bos_bullish = (
-                current_price > highs[-1]["price"] and
-                structure == "UPTREND"
-            )
-            # BOS Bearish: harga break below last swing low
-            bos_bearish = (
-                current_price < lows[-1]["price"] and
-                structure == "DOWNTREND"
-            )
+            # ── FIX BUG #1: BOS Logic ──────────────────────────
+            # BOS = harga break melewati swing high/low terakhir
+            # TIDAK perlu cek struktur dulu — BOS adalah konfirmasi
+            # bahwa struktur baru sedang terbentuk
+
+            # BOS Bullish: harga close di atas swing high terakhir
+            # (valid di struktur apapun — ini yang bikin UPTREND)
+            bos_bullish = current_price > highs[-1]["price"]
+
+            # BOS Bearish: harga close di bawah swing low terakhir
+            # (valid di struktur apapun)
+            bos_bearish = current_price < lows[-1]["price"]
+
             bos = bos_bullish or bos_bearish
 
-            # Change of Character (CHoCH)
-            # CHoCH: struktur berubah arah
-            choch_bullish = (
-                lh and ll and  # sebelumnya downtrend
-                current_price > highs[-1]["price"]  # sekarang break high
-            )
-            choch_bearish = (
-                hh and hl and  # sebelumnya uptrend
-                current_price < lows[-1]["price"]   # sekarang break low
-            )
+            # CHoCH = struktur sebelumnya berlawanan dgn break terbaru
+            # CHoCH Bullish: sebelumnya downtrend (lh+ll),
+            # tapi sekarang break above swing high
+            choch_bullish = (lh and ll and bos_bullish)
+
+            # CHoCH Bearish: sebelumnya uptrend (hh+hl),
+            # tapi sekarang break below swing low
+            choch_bearish = (hh and hl and bos_bearish)
+
             choch = choch_bullish or choch_bearish
 
             return {
@@ -157,15 +159,14 @@ class SMCAnalysis:
             for i in range(1, min(lookback, len(df)-1)):
                 idx = -(i+1)  # Dari candle terakhir mundur
 
-                curr = df.iloc[idx]
+                curr   = df.iloc[idx]
                 next_c = df.iloc[idx+1]
 
-                # Bullish OB: candle bearish sebelum
-                # impulse naik kuat
+                # Bullish OB: candle bearish sebelum impulse naik kuat
                 if direction == "BUY":
-                    is_bearish = curr["close"] < curr["open"]
+                    is_bearish   = curr["close"] < curr["open"]
                     next_bullish = next_c["close"] > next_c["open"]
-                    strong_move = (
+                    strong_move  = (
                         (next_c["close"] - next_c["open"]) >
                         (curr["open"] - curr["close"]) * 1.5
                     )
@@ -181,12 +182,11 @@ class SMCAnalysis:
                             "valid"   : True,
                         })
 
-                # Bearish OB: candle bullish sebelum
-                # impulse turun kuat
+                # Bearish OB: candle bullish sebelum impulse turun kuat
                 elif direction == "SELL":
-                    is_bullish = curr["close"] > curr["open"]
+                    is_bullish   = curr["close"] > curr["open"]
                     next_bearish = next_c["close"] < next_c["open"]
-                    strong_move = (
+                    strong_move  = (
                         (next_c["open"] - next_c["close"]) >
                         (curr["close"] - curr["open"]) * 1.5
                     )
@@ -296,28 +296,26 @@ class SMCAnalysis:
             lookback = cfg.LIQUIDITY_LOOKBACK
             recent   = df.tail(lookback)
 
-            # Buy Side Liquidity (BSL) = area di atas
-            # swing high (equal highs)
-            highs = recent["high"].values
+            # Buy Side Liquidity (BSL) = equal highs
+            highs      = recent["high"].values
             bsl_levels = []
 
             for i in range(len(highs)-1):
                 for j in range(i+1, len(highs)):
                     diff = abs(highs[i] - highs[j]) / highs[i]
-                    if diff < 0.001:  # Equal highs (0.1% tolerance)
+                    if diff < 0.001:  # 0.1% tolerance
                         bsl_levels.append(
                             (highs[i] + highs[j]) / 2
                         )
 
-            # Sell Side Liquidity (SSL) = area di bawah
-            # swing low (equal lows)
-            lows = recent["low"].values
+            # Sell Side Liquidity (SSL) = equal lows
+            lows      = recent["low"].values
             ssl_levels = []
 
             for i in range(len(lows)-1):
                 for j in range(i+1, len(lows)):
                     diff = abs(lows[i] - lows[j]) / lows[i]
-                    if diff < 0.001:  # Equal lows
+                    if diff < 0.001:
                         ssl_levels.append(
                             (lows[i] + lows[j]) / 2
                         )
@@ -325,31 +323,35 @@ class SMCAnalysis:
             current_price = df["close"].iloc[-1]
 
             # BSL terdekat di atas harga
-            bsl_above = [b for b in bsl_levels
-                         if b > current_price]
+            bsl_above   = [b for b in bsl_levels if b > current_price]
             nearest_bsl = min(bsl_above) if bsl_above else None
 
             # SSL terdekat di bawah harga
-            ssl_below = [s for s in ssl_levels
-                         if s < current_price]
+            ssl_below   = [s for s in ssl_levels if s < current_price]
             nearest_ssl = max(ssl_below) if ssl_below else None
 
-            # Cek apakah liquidity sudah di-sweep
-            last_high = df["high"].iloc[-1]
-            last_low  = df["low"].iloc[-1]
+            # ── FIX BUG #2: Cek sweep di 5 candle terakhir ────────────────
+            # Sebelumnya hanya cek iloc[-1] (1 candle saja)
+            # Sekarang cek 5 candle terakhir agar lebih akurat
+            recent_highs = df["high"].iloc[-5:]
+            recent_lows  = df["low"].iloc[-5:]
 
-            bsl_swept = (nearest_bsl and
-                         last_high > nearest_bsl)
-            ssl_swept = (nearest_ssl and
-                         last_low  < nearest_ssl)
+            bsl_swept = bool(
+                nearest_bsl and
+                (recent_highs > nearest_bsl).any()
+            )
+            ssl_swept = bool(
+                nearest_ssl and
+                (recent_lows < nearest_ssl).any()
+            )
 
             return {
-                "bsl_levels"  : sorted(bsl_levels)[-3:],
-                "ssl_levels"  : sorted(ssl_levels)[:3],
-                "nearest_bsl" : nearest_bsl,
-                "nearest_ssl" : nearest_ssl,
-                "bsl_swept"   : bsl_swept,
-                "ssl_swept"   : ssl_swept,
+                "bsl_levels"   : sorted(bsl_levels)[-3:],
+                "ssl_levels"   : sorted(ssl_levels)[:3],
+                "nearest_bsl"  : nearest_bsl,
+                "nearest_ssl"  : nearest_ssl,
+                "bsl_swept"    : bsl_swept,
+                "ssl_swept"    : ssl_swept,
                 "current_price": current_price,
             }
 
@@ -364,39 +366,37 @@ class SMCAnalysis:
                              lookback: int = 50) -> dict:
         """Tentukan Premium & Discount Zone"""
         try:
-            recent = df.tail(lookback)
-            high   = recent["high"].max()
-            low    = recent["low"].min()
-            mid    = (high + low) / 2
+            recent  = df.tail(lookback)
+            high    = recent["high"].max()
+            low     = recent["low"].min()
+            mid     = (high + low) / 2
             current = df["close"].iloc[-1]
 
-            # Fibonacci levels dari range
             range_size = high - low
-            fib_50  = low + range_size * 0.5
-            fib_618 = low + range_size * 0.618
+            fib_50     = low + range_size * 0.5
+            fib_618    = low + range_size * 0.618
 
             is_discount = current < mid
             is_premium  = current > mid
 
-            # Seberapa dalam di zone
             if is_discount:
                 depth = (mid - current) / (mid - low) * 100
             else:
                 depth = (current - mid) / (high - mid) * 100
 
             return {
-                "high"        : high,
-                "low"         : low,
-                "mid"         : mid,
-                "fib_50"      : fib_50,
-                "fib_618"     : fib_618,
-                "current"     : current,
-                "is_discount" : is_discount,
-                "is_premium"  : is_premium,
-                "zone"        : "DISCOUNT" if is_discount else "PREMIUM",
-                "depth_pct"   : depth,
-                "ideal_buy"   : is_discount,
-                "ideal_sell"  : is_premium,
+                "high"       : high,
+                "low"        : low,
+                "mid"        : mid,
+                "fib_50"     : fib_50,
+                "fib_618"    : fib_618,
+                "current"    : current,
+                "is_discount": is_discount,
+                "is_premium" : is_premium,
+                "zone"       : "DISCOUNT" if is_discount else "PREMIUM",
+                "depth_pct"  : depth,
+                "ideal_buy"  : is_discount,
+                "ideal_sell" : is_premium,
             }
 
         except Exception as e:
@@ -411,32 +411,25 @@ class SMCAnalysis:
         """Deteksi Breaker Block (OB yang gagal)"""
         try:
             breakers = []
-            structure = self.detect_market_structure(df)
-
-            # Breaker = OB yang sudah ditembus
-            # dan sekarang jadi resistance/support baru
-            obs = self.detect_order_blocks(df, direction)
+            obs      = self.detect_order_blocks(df, direction)
 
             for ob in obs:
-                # Cek apakah harga sudah menembus OB
                 current = df["close"].iloc[-1]
 
                 if direction == "BUY":
-                    # Bullish breaker: harga sudah di atas OB
                     if current > ob["top"]:
                         breakers.append({
-                            "type"   : "Bullish Breaker",
-                            "level"  : ob["top"],
-                            "zone"   : (ob["bottom"], ob["top"]),
+                            "type" : "Bullish Breaker",
+                            "level": ob["top"],
+                            "zone" : (ob["bottom"], ob["top"]),
                         })
 
                 elif direction == "SELL":
-                    # Bearish breaker: harga sudah di bawah OB
                     if current < ob["bottom"]:
                         breakers.append({
-                            "type"   : "Bearish Breaker",
-                            "level"  : ob["bottom"],
-                            "zone"   : (ob["bottom"], ob["top"]),
+                            "type" : "Bearish Breaker",
+                            "level": ob["bottom"],
+                            "zone" : (ob["bottom"], ob["top"]),
                         })
 
             return breakers
@@ -456,22 +449,19 @@ class SMCAnalysis:
             recent   = df.tail(lookback)
 
             if direction == "BUY":
-                # Inducement bullish: equal lows kecil
-                # sebelum harga naik
                 lows = recent["low"].values
                 for i in range(len(lows)-2):
                     diff = abs(lows[i] - lows[i+1]) / lows[i]
-                    if diff < 0.002:  # 0.2% tolerance
+                    if diff < 0.002:
                         return {
-                            "detected"  : True,
-                            "type"      : "Bullish Inducement",
-                            "level"     : (lows[i] + lows[i+1]) / 2,
+                            "detected"   : True,
+                            "type"       : "Bullish Inducement",
+                            "level"      : (lows[i] + lows[i+1]) / 2,
                             "description": "Equal lows terdeteksi "
                                           "→ potensi liquidity grab",
                         }
 
             elif direction == "SELL":
-                # Inducement bearish: equal highs kecil
                 highs = recent["high"].values
                 for i in range(len(highs)-2):
                     diff = abs(highs[i] - highs[i+1]) / highs[i]
@@ -498,9 +488,9 @@ class SMCAnalysis:
         """Full SMC analysis multi-timeframe"""
         try:
             # 4H — Bias & Structure
-            structure_4h  = self.detect_market_structure(df_4h)
-            prem_disc_4h  = self.get_premium_discount(df_4h)
-            liquidity_4h  = self.detect_liquidity(df_4h)
+            structure_4h = self.detect_market_structure(df_4h)
+            prem_disc_4h = self.get_premium_discount(df_4h)
+            liquidity_4h = self.detect_liquidity(df_4h)
 
             # Tentukan direction dari 4H
             direction = structure_4h.get("direction")
@@ -521,9 +511,9 @@ class SMCAnalysis:
 
             # 15M — Entry
             current_price = df_15m["close"].iloc[-1]
-            in_ob   = self.is_price_in_ob(current_price, obs_1h)
-            in_fvg  = self.is_price_in_fvg(current_price, fvgs_1h)
-            inducement = self.detect_inducement(df_15m, direction)
+            in_ob         = self.is_price_in_ob(current_price, obs_1h)
+            in_fvg        = self.is_price_in_fvg(current_price, fvgs_1h)
+            inducement    = self.detect_inducement(df_15m, direction)
 
             # Liquidity swept check
             liq_swept = (

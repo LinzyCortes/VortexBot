@@ -277,7 +277,7 @@ class TelegramNotifier:
                     f"Min required: "
                     f"{cfg.MIN_CONFLUENCE_SCORE}/16\n"
                     f"Ubah di Railway Variables:\n"
-                    f"MIN_CONFLUENCE_SCORE=9"
+                    f"MIN_CONFLUENCE_SCORE=7"
                 )
 
             else:
@@ -327,14 +327,25 @@ class TelegramNotifier:
     def send_morning_briefing(self, balance: float,
                                upcoming_news: list,
                                market_regime: str):
-        """Morning briefing — dikirim jam 07:00 WIB"""
+        """
+        Morning briefing — dikirim jam 07:00 WIB.
+
+        Jadwal pantau harian:
+          07:00 WIB  Morning Briefing (ini)
+          14:45 WIB  Pre-London Buffer
+          15:00 WIB  London Killzone MULAI
+          17:30 WIB  London Killzone SELESAI
+          20:15 WIB  Pre-NY Buffer
+          20:30 WIB  New York Killzone MULAI
+          23:00 WIB  New York Killzone SELESAI
+          22:00 WIB  Daily Summary
+        """
         now = _wib_now()
 
         news_text = ""
         if upcoming_news:
             news_text = "\n📰 <b>High Impact News Hari Ini:</b>\n"
             for n in upcoming_news[:3]:
-                # Tampilkan waktu WIB kalau ada, fallback ke minutes_away
                 t = n.get("time_wib") or f"{n.get('minutes_away','?')} mnt lagi"
                 news_text += f"  • {n['title']} ({t})\n"
         else:
@@ -359,12 +370,14 @@ class TelegramNotifier:
             f"🌍 Market     : <b>{regime_text}</b>\n"
             f"{news_text}"
             f"{'='*35}\n"
-            f"📋 Jadwal Hari Ini:\n"
-            f"  🟡 Pre-London  : 13:45 WIB\n"
-            f"  🟢 London      : 14:00 – 17:00 WIB\n"
-            f"  🟡 Pre-NY      : 19:15 WIB\n"
-            f"  🟢 New York    : 19:30 – 23:00 WIB\n"
+            f"📋 <b>Jadwal Hari Ini:</b>\n"
+            f"  🟡 Pre-London  : 14:45 WIB\n"
+            f"  🟢 London      : 15:00 – 17:30 WIB\n"
+            f"  🟡 Pre-NY      : 20:15 WIB\n"
+            f"  🟢 New York    : 20:30 – 23:00 WIB\n"
+            f"  📊 Daily Sum   : 22:00 WIB\n"
             f"{'='*35}\n"
+            f"🎯 Min Score  : <b>{cfg.MIN_CONFLUENCE_SCORE}/16</b>\n"
             f"🤖 Bot aktif & siap hunting setup!\n"
             f"📱 Ketik /help untuk commands"
         )

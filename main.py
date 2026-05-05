@@ -36,7 +36,6 @@ def wib_str(dt: datetime = None) -> str:
     if dt is None:
         dt = now_wib()
     elif dt.tzinfo is None:
-        # naive datetime → anggap UTC, konversi ke WIB
         dt = dt.replace(tzinfo=UTC).astimezone(WIB)
     else:
         dt = dt.astimezone(WIB)
@@ -70,6 +69,14 @@ class VortexBot:
         self.start_time  = None   # disimpan dalam UTC
         self.pairs       = cfg.PAIRS
         self.open_trades = {}
+
+        # ── State: news block notif ───────────────────────────────────────────
+        # Supaya notif news block tidak spam tiap scan.
+        # Key: frozenset dari judul news yang sedang blokir.
+        # Value: True jika sudah dikirim notif untuk kombinasi news ini.
+        self._news_block_notified = False   # True saat blokir sedang aktif
+        self._news_block_key      = None    # frozenset judul news terakhir
+
         logger.info(
             f"\n{'='*45}\n"
             f"  {self.name} v{self.version}\n"
@@ -125,7 +132,7 @@ class VortexBot:
         telegram.start_polling(bot_ref=self)
         logger.info("📱 Telegram commands active!")
 
-        # 6. Set running (start_time pakai UTC untuk kalkulasi durasi)
+        # 6. Set running
         self.running    = True
         self.start_time = now_utc()
 
@@ -145,17 +152,119 @@ class VortexBot:
     def _set_period_balances(self, balance: float):
         if not db.get_state("weekly_starting_balance"):
             db.set_state("weekly_starting_balance", {
-                "balance": balance,
-                # Simpan keduanya untuk referensi
+                "balance" : balance,
                 "date_wib": now_wib().isoformat(),
                 "date_utc": now_utc().isoformat(),
             })
         if not db.get_state("monthly_starting_balance"):
             db.set_state("monthly_starting_balance", {
-                "balance": balance,
+                "balance" : balance,
                 "date_wib": now_wib().isoformat(),
                 "date_utc": now_utc().isoformat(),
             })
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # NEWS BLOCK NOTIF HELPER
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _check_and_notify_news_block(self) -> bool:
+        """
+        Cek apakah ada news yang sedang blokir trading.
+        Kirim notif Telegram SEKALI per event news (tidak spam tiap scan).
+
+        Returns:
+            True  → ada news yang blokir (caller harus skip)
+            False → aman, lanjut trading
+        """
+        try:
+            block_info = news_filter.get_blocking_news()
+
+            if block_info["is_blocking"]:
+                # Buat key unik dari judul-judul news yang aktif
+                current_key = frozenset(
+                    n.get("title", "") for n in block_info["news_list"]
+                )
+
+                # Kirim notif hanya jika ini event news yang berbeda
+                # dari yang sudah dinotif sebelumnya
+                if not self._news_block_notified or \
+                        current_key != self._news_block_key:
+
+                    telegram.send_news_block(
+                        pairs       =self.pairs,
+                        news_list   =block_info["news_list"],
+                        safe_resume =block_info["safe_resume"],
+                    )
+                    self._news_block_notified = True
+                    self._news_block_key      = current_key
+
+                    logger.warning(
+                        f"⚠️ NEWS BLOCK aktif | "
+                        f"Aman lagi: {block_info['safe_resume']} | "
+                        f"{wib_str()}"
+                    )
+                return True
+
+            else:
+                # News sudah selesai — reset state
+                if self._news_block_notified:
+                    logger.info(
+                        f"✅ News block selesai — "
+                        f"trading aman kembali | {wib_str()}"
+                    )
+                self._news_block_notified = False
+                self._news_block_key      = None
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ _check_and_notify_news_block error: {e}")
+            return False
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # SCORE LOG HELPER
+    # ═════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _build_score_log(pair: str, ind: dict,
+                         smc_result: dict, score: int) -> str:
+        """
+        Bangun string log score per pair untuk Railway console.
+
+        Format:
+          BTC-USDT | EMA✅ RSI✅ MACD❌ ADX❌ | BOS❌ OB❌ FVG✅ | Score: 5/16
+        """
+        try:
+            # ── Indicators ───────────────────────────────────────────────────
+            # EMA: trend filter — ema_trend harus "up" atau "down" (bukan None)
+            ema_ok  = "✅" if ind.get("ema_trend") in ("up", "down") else "❌"
+
+            # RSI: tidak overbought/oversold ekstrem (20–80)
+            rsi_val = ind.get("rsi", 50)
+            rsi_ok  = "✅" if 20 <= rsi_val <= 80 else "❌"
+
+            # MACD: histogram tidak nol (ada momentum)
+            macd_ok = "✅" if ind.get("macd_histogram", 0) != 0 else "❌"
+
+            # ADX: trend strength > 20
+            adx_ok  = "✅" if ind.get("adx", 0) > 20 else "❌"
+
+            # ── SMC ──────────────────────────────────────────────────────────
+            bos_ok = "✅" if (
+                smc_result.get("bos_4h") or smc_result.get("bos_1h")
+            ) else "❌"
+
+            ob_ok  = "✅" if smc_result.get("in_ob")  else "❌"
+            fvg_ok = "✅" if smc_result.get("in_fvg") else "❌"
+
+            return (
+                f"{pair} | "
+                f"EMA{ema_ok} RSI{rsi_ok} MACD{macd_ok} ADX{adx_ok} | "
+                f"BOS{bos_ok} OB{ob_ok} FVG{fvg_ok} | "
+                f"Score: {score}/16"
+            )
+
+        except Exception as e:
+            return f"{pair} | Score log error: {e}"
 
     # ═════════════════════════════════════════════════════════════════════════
     # MAIN ANALYSIS ENGINE
@@ -186,10 +295,16 @@ class VortexBot:
                 )
                 return {}
 
-            news_status = news_filter.is_safe_to_trade()
-            if not news_status.get("is_safe"):
-                logger.warning(f"⚠️ Skip {pair}: High impact news!")
+            # ── News filter — cek & notif sekali per event ───────────────────
+            news_blocked = self._check_and_notify_news_block()
+            if news_blocked:
+                logger.warning(
+                    f"⚠️ Skip {pair}: News block aktif"
+                )
                 return {}
+
+            # Ambil news_status normal untuk dipakai di confluence scorer
+            news_status = news_filter.is_safe_to_trade()
 
             # ── STEP 2: FETCH DATA ───────────────────────────────────────────
             ohlcv_4h  = exchange.get_ohlcv(pair, cfg.TF_BIAS,  limit=200)
@@ -267,12 +382,21 @@ class VortexBot:
             is_valid = score_result.get("is_valid", False)
             grade    = score_result.get("grade", "F")
 
-            logger.info(
-                f"📊 {pair}: {score}/16 ({grade}) | "
-                f"Valid: {is_valid}"
+            # ── LOG DETAIL SCORE KE RAILWAY CONSOLE ─────────────────────────
+            score_log = self._build_score_log(
+                pair       =pair,
+                ind        =ind_15m,
+                smc_result =smc_result,
+                score      =score,
             )
+            logger.info(f"📊 {score_log}")
 
             if not is_valid:
+                logger.info(
+                    f"⏭️ {pair}: Score {score}/16 ({grade}) "
+                    f"— below threshold "
+                    f"({cfg.MIN_CONFLUENCE_SCORE}/16)"
+                )
                 return {}
 
             # ── STEP 7: BUILD SIGNAL ─────────────────────────────────────────
@@ -325,10 +449,9 @@ class VortexBot:
                 "tf_bias"         : cfg.TF_BIAS,
                 "tf_setup"        : cfg.TF_SETUP,
                 "tf_entry"        : cfg.TF_ENTRY,
-                # Simpan keduanya — WIB untuk display, UTC untuk audit
                 "detected_at_wib" : now_wib().isoformat(),
                 "detected_at_utc" : now_utc().isoformat(),
-                "detected_at"     : now_wib().isoformat(),  # default WIB
+                "detected_at"     : now_wib().isoformat(),
                 "exchange"        : EXCHANGE_NAME,
             }
 
@@ -435,8 +558,8 @@ class VortexBot:
             self.open_trades[trade_id] = {
                 **trade_data,
                 "trade_id"          : trade_id,
-                "open_time"         : now_utc(),   # UTC untuk kalkulasi durasi
-                "open_time_wib"     : now_wib(),   # WIB untuk display
+                "open_time"         : now_utc(),
+                "open_time_wib"     : now_wib(),
                 "tp1_closed"        : False,
                 "quantity_remaining": quantity,
                 "original_qty"      : quantity,
@@ -622,7 +745,6 @@ class VortexBot:
                 else (entry - close_price) * qty
             )
 
-            # Kalkulasi durasi pakai UTC (akurat)
             duration = int(
                 (now_utc() - open_time).seconds / 60
             ) if isinstance(open_time, datetime) else 0
@@ -698,23 +820,6 @@ class VortexBot:
     # WIB 10:00 → UTC 03:00
     # WIB 15:00 → UTC 08:00
     # ─────────────────────────────────────────────────────────────────────────
-    # KONVERSI JAM: Railway jalan di UTC. Rumus → UTC = WIB - 7 jam
-    #
-    # Checklist harian lo:
-    #   07:00 WIB  Morning Briefing      → UTC 00:00
-    #   13:45 WIB  Pre-London (log only) → UTC 06:45
-    #   17:00 WIB  London Summary        → UTC 10:00
-    #   22:00 WIB  Daily Summary         → UTC 15:00
-    #   23:00 WIB  NY Summary            → UTC 16:00
-    #
-    # Weekly:
-    #   Minggu 14:00 WIB  Weekly Summary     → UTC 07:00
-    #   Minggu 15:00 WIB  Weekly Evaluation  → UTC 08:00
-    #   Senin  00:01 WIB  Weekly Reset       → Minggu UTC 17:01
-    #
-    # Monthly:
-    #   Tgl 1, 00:01 WIB  Monthly Reset      → UTC 17:01 hari sebelumnya
-    # ═════════════════════════════════════════════════════════════════════════
 
     def setup_scheduled_tasks(self):
         # Morning briefing  → 07:00 WIB = 00:00 UTC
@@ -729,7 +834,7 @@ class VortexBot:
         # NY session summary → 23:00 WIB = 16:00 UTC
         schedule.every().day.at("16:00").do(self._ny_session_summary)
 
-        # Health check → setiap 6 jam (tidak perlu konversi)
+        # Health check → setiap 6 jam
         schedule.every(6).hours.do(self._health_check)
 
         # Weekly summary    → Minggu 14:00 WIB = Minggu 07:00 UTC
@@ -798,7 +903,6 @@ class VortexBot:
 
     def _health_check(self):
         try:
-            # Uptime dihitung dari UTC (akurat)
             uptime = (
                 (now_utc() - self.start_time).seconds / 3600
                 if self.start_time else 0
@@ -882,7 +986,6 @@ class VortexBot:
 
     def _check_monthly_reset(self):
         try:
-            # Cek hari WIB (bukan UTC) karena reset berdasarkan kalender WIB
             if now_wib().day == 1:
                 balance = exchange.get_balance().get("free", 0)
                 db.set_state("monthly_starting_balance", {
@@ -922,6 +1025,7 @@ class VortexBot:
             try:
                 schedule.run_pending()
 
+                # ── Cek pause ────────────────────────────────────────────────
                 pause = risk_manager.is_bot_paused()
                 if pause.get("paused"):
                     logger.info(
@@ -933,8 +1037,30 @@ class VortexBot:
                     time.sleep(300)
                     continue
 
+                # ── Cek killzone transition (masuk / keluar) ──────────────────
+                # Dipanggil sebelum analyze_pair supaya notif
+                # terkirim tepat saat transisi, bukan saat ada pair scan saja.
+                try:
+                    kz_event = session_filter.check_killzone_transition()
+                    if kz_event.get("event"):
+                        telegram.send_killzone_alert(
+                            event       =kz_event["event"],
+                            session     =kz_event["session"],
+                            wib_time    =kz_event["wib_time"],
+                            minutes_left=kz_event.get("minutes_left", 0),
+                        )
+                        logger.info(
+                            f"🔔 Killzone {kz_event['event']}: "
+                            f"{kz_event['session']} | "
+                            f"{kz_event['wib_time']}"
+                        )
+                except Exception as e:
+                    logger.error(f"❌ Killzone transition check error: {e}")
+
+                # ── Monitor open trades ───────────────────────────────────────
                 self.monitor_trades()
 
+                # ── Scan pairs ────────────────────────────────────────────────
                 signals_found = 0
                 for pair in self.pairs:
                     signal = self.analyze_pair(pair)
@@ -943,7 +1069,7 @@ class VortexBot:
                         self.execute_trade(signal)
                     time.sleep(2)
 
-                # ── Log scan result — WIB sebagai primary display ─────────────
+                # ── Log scan result ───────────────────────────────────────────
                 t_wib = now_wib()
                 t_utc = now_utc()
                 logger.info(

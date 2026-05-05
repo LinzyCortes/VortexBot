@@ -324,6 +324,130 @@ class TelegramNotifier:
         )
         self.send(msg)
 
+    # ─── NEW: NEWS BLOCK NOTIFICATION ───────
+
+    def send_news_block(self, pairs: list, news_list: list,
+                        safe_resume: str):
+        """
+        Notif saat news memblokir trading.
+
+        Args:
+            pairs       : list pair yang di-skip, e.g. ["BTC-USDT", "ETH-USDT"]
+            news_list   : list dict dari get_blocking_news()["news_list"]
+                          setiap item: {"title", "country", "safe_at_wib"}
+            safe_resume : string jam WIB aman lagi, e.g. "17:30 WIB"
+
+        Contoh output Telegram:
+            ⚠️ NEWS BLOCK
+            ══════════════════════════════════════
+            BTC-USDT & ETH-USDT di-skip
+
+            📰 News Aktif:
+              • FOMC Minutes (USD, High)
+              • CPI Data (USD, High)
+
+            ✅ Aman lagi jam: 17:30 WIB
+            ⏰ 16:58:22 WIB
+        """
+        try:
+            pairs_str = " & ".join(pairs) if pairs else "Semua pair"
+
+            news_lines = ""
+            for n in news_list:
+                title      = n.get("title", "Unknown")
+                country    = n.get("country", "")
+                country_str = f", {country}" if country else ""
+                news_lines += f"  • {title} (High{country_str})\n"
+
+            if not news_lines:
+                news_lines = "  • High impact event aktif\n"
+
+            msg = (
+                f"⚠️ <b>NEWS BLOCK</b>\n"
+                f"{'='*35}\n"
+                f"<b>{pairs_str}</b> di-skip\n\n"
+                f"📰 <b>News Aktif:</b>\n"
+                f"{news_lines}\n"
+                f"✅ Aman lagi jam: <b>{safe_resume}</b>\n"
+                f"⏰ {_wib_str()}"
+            )
+            self.send(msg)
+            logger.info(
+                f"📱 News block notif sent | "
+                f"pairs={pairs_str} | resume={safe_resume}"
+            )
+        except Exception as e:
+            logger.error(f"❌ send_news_block error: {e}")
+
+    # ─── NEW: KILLZONE ALERT ─────────────────
+
+    def send_killzone_alert(self, event: str, session: str,
+                            wib_time: str,
+                            minutes_left: int = 0):
+        """
+        Notif saat masuk atau keluar killzone.
+
+        Args:
+            event        : "started" atau "ended"
+            session      : nama sesi, e.g. "London Killzone"
+            wib_time     : jam WIB saat ini, e.g. "15:00 WIB"
+            minutes_left : menit tersisa (hanya relevan saat event=started)
+
+        Contoh output (started):
+            🟢 LONDON KILLZONE DIMULAI
+            ══════════════════════════════════════
+            Jam    : 15:00 WIB
+            Durasi : ±2j 30m
+            🎯 Bot mulai hunting setup...
+
+        Contoh output (ended):
+            🔴 LONDON KILLZONE SELESAI
+            ══════════════════════════════════════
+            Jam    : 17:30 WIB
+            😴 Bot kembali standby...
+        """
+        try:
+            # Buat nama sesi uppercase tanpa kata "KILLZONE" untuk header
+            session_upper = session.upper().replace(" KILLZONE", "")
+
+            if event == "started":
+                hours   = minutes_left // 60
+                mins    = minutes_left % 60
+                dur_str = (
+                    f"{hours}j {mins}m" if hours > 0
+                    else f"{mins} menit"
+                )
+                msg = (
+                    f"🟢 <b>{session_upper} KILLZONE DIMULAI</b>\n"
+                    f"{'='*35}\n"
+                    f"Jam    : <b>{wib_time}</b>\n"
+                    f"Durasi : ±{dur_str}\n"
+                    f"{'='*35}\n"
+                    f"🎯 Bot mulai hunting setup...\n"
+                    f"⏰ {_wib_str()}"
+                )
+            elif event == "ended":
+                msg = (
+                    f"🔴 <b>{session_upper} KILLZONE SELESAI</b>\n"
+                    f"{'='*35}\n"
+                    f"Jam    : <b>{wib_time}</b>\n"
+                    f"{'='*35}\n"
+                    f"😴 Bot kembali standby...\n"
+                    f"⏰ {_wib_str()}"
+                )
+            else:
+                return
+
+            self.send(msg)
+            logger.info(
+                f"📱 Killzone notif sent | "
+                f"event={event} | session={session} | {wib_time}"
+            )
+        except Exception as e:
+            logger.error(f"❌ send_killzone_alert error: {e}")
+
+    # ─── EXISTING NOTIFICATIONS ─────────────
+
     def send_morning_briefing(self, balance: float,
                                upcoming_news: list,
                                market_regime: str):
@@ -413,18 +537,18 @@ class TelegramNotifier:
         self.send(msg)
 
     def send_trade_opened(self, trade: dict):
-        pair     = trade.get("pair", "")
-        direction= trade.get("direction", "")
-        entry    = trade.get("entry_price", 0)
-        sl       = trade.get("sl_price", 0)
-        tp1      = trade.get("tp1_price", 0)
-        tp2      = trade.get("tp2_price", 0)
-        tp3      = trade.get("tp3_price", 0)
-        size     = trade.get("position_usdt", 0)
-        lev      = trade.get("leverage", 1)
-        score    = trade.get("confluence_score", 0)
-        risk_amt = trade.get("risk_amount", 0)
-        mode     = trade.get("mode", "")
+        pair      = trade.get("pair", "")
+        direction = trade.get("direction", "")
+        entry     = trade.get("entry_price", 0)
+        sl        = trade.get("sl_price", 0)
+        tp1       = trade.get("tp1_price", 0)
+        tp2       = trade.get("tp2_price", 0)
+        tp3       = trade.get("tp3_price", 0)
+        size      = trade.get("position_usdt", 0)
+        lev       = trade.get("leverage", 1)
+        score     = trade.get("confluence_score", 0)
+        risk_amt  = trade.get("risk_amount", 0)
+        mode      = trade.get("mode", "")
 
         dir_emoji = "🟢 LONG" if direction == "BUY" else "🔴 SHORT"
         risk = abs(entry - sl)
@@ -453,14 +577,14 @@ class TelegramNotifier:
         self.send(msg)
 
     def send_trade_closed(self, trade: dict, close_data: dict):
-        pair     = trade.get("pair", "")
-        direction= trade.get("direction", "")
-        entry    = trade.get("entry_price", 0)
-        pnl      = close_data.get("pnl", 0)
-        rr       = close_data.get("rr_achieved", 0)
-        reason   = close_data.get("close_reason", "")
-        duration = close_data.get("duration_minutes", 0)
-        balance  = close_data.get("new_balance", 0)
+        pair      = trade.get("pair", "")
+        direction = trade.get("direction", "")
+        entry     = trade.get("entry_price", 0)
+        pnl       = close_data.get("pnl", 0)
+        rr        = close_data.get("rr_achieved", 0)
+        reason    = close_data.get("close_reason", "")
+        duration  = close_data.get("duration_minutes", 0)
+        balance   = close_data.get("new_balance", 0)
 
         hours  = duration // 60
         mins   = duration % 60

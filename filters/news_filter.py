@@ -101,11 +101,16 @@ class NewsFilter:
                 window_end   = news_time + timedelta(minutes=minutes_after)
 
                 if window_start <= now_utc <= window_end:
+                    # Hitung jam aman (window_end + buffer kecil) dalam WIB
+                    safe_at_utc = window_end
+                    safe_at_wib = safe_at_utc + timedelta(hours=7)
+
                     unsafe_news.append({
-                        "title"  : news.get("title", ""),
-                        "time"   : time_str,
-                        "impact" : impact,
-                        "country": news.get("country", ""),
+                        "title"      : news.get("title", ""),
+                        "time"       : time_str,
+                        "impact"     : impact,
+                        "country"    : news.get("country", ""),
+                        "safe_at_wib": safe_at_wib.strftime("%H:%M WIB"),
                     })
 
             is_safe = len(unsafe_news) == 0
@@ -125,6 +130,52 @@ class NewsFilter:
         except Exception as e:
             logger.error(f"❌ News check error: {e}")
             return {"is_safe": True, "unsafe_news": []}
+
+    def get_blocking_news(self,
+                          minutes_before: int = 30,
+                          minutes_after : int = 30) -> dict:
+        """
+        Return detail news yang sedang blokir trading.
+        Dipakai oleh main.py untuk kirim notif Telegram.
+
+        Returns:
+            {
+                "is_blocking": bool,
+                "news_list"  : [{"title", "country", "impact", "safe_at_wib"}],
+                "safe_resume": "17:30 WIB",   # jam paling akhir dari semua news
+            }
+        """
+        try:
+            status = self.is_safe_to_trade(minutes_before, minutes_after)
+            if status["is_safe"]:
+                return {"is_blocking": False, "news_list": [], "safe_resume": None}
+
+            unsafe = status["unsafe_news"]
+
+            # Cari jam safe paling akhir dari semua news yang blocking
+            # Format: "HH:MM WIB" → parse jam & menit untuk sort
+            latest_safe = None
+            for n in unsafe:
+                safe_str = n.get("safe_at_wib", "")
+                if safe_str:
+                    try:
+                        t = datetime.strptime(safe_str, "%H:%M WIB")
+                        if latest_safe is None or t > latest_safe:
+                            latest_safe = t
+                    except Exception:
+                        pass
+
+            safe_resume = latest_safe.strftime("%H:%M WIB") if latest_safe else "N/A"
+
+            return {
+                "is_blocking": True,
+                "news_list"  : unsafe,
+                "safe_resume": safe_resume,
+            }
+
+        except Exception as e:
+            logger.error(f"❌ get_blocking_news error: {e}")
+            return {"is_blocking": False, "news_list": [], "safe_resume": None}
 
     def get_upcoming_news(self,
                           hours_ahead: int = 12) -> list:
@@ -222,6 +273,13 @@ class SessionFilter:
             },
         ]
 
+        # ── State tracking untuk killzone notifications ───────────────────────
+        # Menyimpan session key yang sudah dikirim notif "STARTED"
+        # supaya notif tidak dikirim ulang tiap scan (tiap 60 detik)
+        self._notified_start : set  = set()   # {"london", "new_york"}
+        self._notified_end   : set  = set()   # {"london", "new_york"}
+        self._last_in_kz_key : str  = None    # session key terakhir yang aktif
+
     def _now_wib(self):
         """Waktu sekarang dalam WIB (timezone-aware)"""
         now_wib  = datetime.now(WIB)
@@ -272,6 +330,76 @@ class SessionFilter:
             "is_pre_session": False,
             "next_session"  : next_s,
         }
+
+    def check_killzone_transition(self) -> dict:
+        """
+        Cek apakah ada transisi killzone yang perlu dinotifikasi.
+        Dipanggil dari main loop tiap scan.
+
+        Returns dict berisi:
+            {
+                "event"      : "started" | "ended" | None,
+                "session_key": "london" | "new_york",
+                "session"    : "London Killzone" | "New York Killzone",
+                "wib_time"   : "15:00 WIB",
+                "minutes_left": 150,   # hanya jika event=started
+            }
+        """
+        try:
+            kz = self.is_killzone()
+            now_wib_dt, hour_wib, minute, _ = self._now_wib()
+            wib_time = f"{hour_wib:02d}:{minute:02d} WIB"
+
+            if kz["in_killzone"]:
+                key     = kz["session_key"]
+                session = kz["session"]
+
+                # Reset end-notif jika session baru mulai
+                if key not in self._notified_start:
+                    self._notified_start.add(key)
+                    self._last_in_kz_key = key
+                    # Kalau session ini pernah di-notif end sebelumnya, reset
+                    self._notified_end.discard(key)
+                    return {
+                        "event"       : "started",
+                        "session_key" : key,
+                        "session"     : session,
+                        "wib_time"    : wib_time,
+                        "minutes_left": kz.get("minutes_left", 0),
+                    }
+
+            else:
+                # Kita baru saja keluar dari killzone?
+                # Cek apakah ada session yang tadi aktif tapi sekarang tidak
+                last_key = self._last_in_kz_key
+                if (last_key and
+                        last_key in self._notified_start and
+                        last_key not in self._notified_end):
+
+                    # Pastikan kita memang sudah melewati close time
+                    session_cfg  = self.sessions.get(last_key, {})
+                    close_h, close_m = session_cfg.get("close", (0, 0))
+                    now_min      = hour_wib * 60 + minute
+                    close_min    = close_h * 60 + close_m
+
+                    if now_min > close_min:
+                        self._notified_end.add(last_key)
+                        self._notified_start.discard(last_key)
+                        self._last_in_kz_key = None
+
+                        session_name = session_cfg.get("name", last_key)
+                        return {
+                            "event"      : "ended",
+                            "session_key": last_key,
+                            "session"    : session_name,
+                            "wib_time"   : wib_time,
+                        }
+
+            return {"event": None}
+
+        except Exception as e:
+            logger.error(f"❌ check_killzone_transition error: {e}")
+            return {"event": None}
 
     def _get_next_session(self, current_min: int) -> dict:
         """Hitung sesi killzone berikutnya"""

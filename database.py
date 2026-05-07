@@ -6,7 +6,7 @@
 import os
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from logger import logger
 
 # Cek apakah PostgreSQL tersedia
@@ -47,7 +47,6 @@ class Database:
                 cursor = conn.cursor()
 
                 if self.use_postgres:
-                    # PostgreSQL syntax
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS trades (
                             id               SERIAL PRIMARY KEY,
@@ -111,11 +110,11 @@ class Database:
                             bos_detected     INTEGER DEFAULT 0,
                             killzone         TEXT,
                             detected_at      TEXT NOT NULL,
-                            acted_on         INTEGER DEFAULT 0
+                            acted_on         INTEGER DEFAULT 0,
+                            notified         INTEGER DEFAULT 0
                         )
                     """)
                 else:
-                    # SQLite syntax
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS trades (
                             id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,13 +178,17 @@ class Database:
                             bos_detected     INTEGER DEFAULT 0,
                             killzone         TEXT,
                             detected_at      TEXT NOT NULL,
-                            acted_on         INTEGER DEFAULT 0
+                            acted_on         INTEGER DEFAULT 0,
+                            notified         INTEGER DEFAULT 0
                         )
                     """)
 
                 conn.commit()
-                db_type = "PostgreSQL" if self.use_postgres else "SQLite"
-                logger.info(f"✅ {db_type} database initialized!")
+                db_type = "PostgreSQL" if self.use_postgres \
+                    else "SQLite"
+                logger.info(
+                    f"✅ {db_type} database initialized!"
+                )
 
         except Exception as e:
             logger.error(f"❌ DB init error: {e}")
@@ -306,7 +309,10 @@ class Database:
                     ("OPEN",)
                 )
                 cols = [d[0] for d in cursor.description]
-                return [dict(zip(cols, r)) for r in cursor.fetchall()]
+                return [
+                    dict(zip(cols, r))
+                    for r in cursor.fetchall()
+                ]
         except Exception as e:
             logger.error(f"❌ Get open trades error: {e}")
             return []
@@ -330,7 +336,10 @@ class Database:
                         ORDER BY open_time DESC
                     """, (f"{today}%",))
                 cols = [d[0] for d in cursor.description]
-                return [dict(zip(cols, r)) for r in cursor.fetchall()]
+                return [
+                    dict(zip(cols, r))
+                    for r in cursor.fetchall()
+                ]
         except Exception as e:
             logger.error(f"❌ Get today trades error: {e}")
             return []
@@ -342,11 +351,15 @@ class Database:
                 cursor = conn.cursor()
                 ph = "%s" if self.use_postgres else "?"
                 cursor.execute(
-                    f"SELECT * FROM trades ORDER BY open_time DESC LIMIT {ph}",
+                    f"SELECT * FROM trades "
+                    f"ORDER BY open_time DESC LIMIT {ph}",
                     (limit,)
                 )
                 cols = [d[0] for d in cursor.description]
-                return [dict(zip(cols, r)) for r in cursor.fetchall()]
+                return [
+                    dict(zip(cols, r))
+                    for r in cursor.fetchall()
+                ]
         except Exception as e:
             logger.error(f"❌ Get history error: {e}")
             return []
@@ -368,12 +381,12 @@ class Database:
                             max_drawdown, best_trade, worst_trade
                         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (date) DO UPDATE SET
-                            total_trades     = EXCLUDED.total_trades,
-                            win_trades       = EXCLUDED.win_trades,
-                            loss_trades      = EXCLUDED.loss_trades,
-                            winrate          = EXCLUDED.winrate,
-                            total_pnl        = EXCLUDED.total_pnl,
-                            ending_balance   = EXCLUDED.ending_balance
+                            total_trades   = EXCLUDED.total_trades,
+                            win_trades     = EXCLUDED.win_trades,
+                            loss_trades    = EXCLUDED.loss_trades,
+                            winrate        = EXCLUDED.winrate,
+                            total_pnl      = EXCLUDED.total_pnl,
+                            ending_balance = EXCLUDED.ending_balance
                     """, (
                         today,
                         summary.get("total_trades", 0),
@@ -410,7 +423,9 @@ class Database:
                     ))
                 conn.commit()
         except Exception as e:
-            logger.error(f"❌ Save daily summary error: {e}")
+            logger.error(
+                f"❌ Save daily summary error: {e}"
+            )
 
     def get_overall_stats(self) -> dict:
         """Statistik keseluruhan"""
@@ -436,7 +451,9 @@ class Database:
                     "total_trades": total,
                     "wins"        : wins,
                     "losses"      : row[2] or 0,
-                    "winrate"     : (wins/total*100) if total > 0 else 0,
+                    "winrate"     : (
+                        wins/total*100 if total > 0 else 0
+                    ),
                     "total_pnl"   : row[3] or 0,
                     "avg_rr"      : row[4] or 0,
                     "best_trade"  : row[5] or 0,
@@ -453,10 +470,10 @@ class Database:
         try:
             with self._connect() as conn:
                 cursor = conn.cursor()
-                ph = "%s" if self.use_postgres else "?"
                 if self.use_postgres:
                     cursor.execute("""
-                        INSERT INTO bot_state (key, value, updated_at)
+                        INSERT INTO bot_state
+                            (key, value, updated_at)
                         VALUES (%s, %s, %s)
                         ON CONFLICT (key) DO UPDATE SET
                             value      = EXCLUDED.value,
@@ -487,7 +504,8 @@ class Database:
                 cursor = conn.cursor()
                 ph = "%s" if self.use_postgres else "?"
                 cursor.execute(
-                    f"SELECT value FROM bot_state WHERE key = {ph}",
+                    f"SELECT value FROM bot_state "
+                    f"WHERE key = {ph}",
                     (key,)
                 )
                 row = cursor.fetchone()
@@ -500,8 +518,109 @@ class Database:
 
     # ─── SIGNALS ────────────────────────────
 
+    def is_signal_recent(self, pair: str,
+                         direction: str,
+                         minutes: int = 30) -> bool:
+        """
+        Cek apakah signal pair+direction yang sama
+        sudah dikirim notif dalam X menit terakhir.
+
+        FIX: Ini root cause spam Telegram.
+        Bot scan tiap 60 detik — kalau signal BTC BUY
+        valid terus selama killzone, tanpa dedup ini
+        notif dikirim tiap menit → 38 notif per sesi.
+
+        Logic:
+        - Cek tabel signals untuk pair+direction
+        - Kalau ada record dengan notified=1 dalam
+          'minutes' menit terakhir → return True (skip)
+        - Kalau tidak ada atau sudah lewat window → False
+
+        Args:
+            pair      : e.g. "BTC-USDT-SWAP"
+            direction : "BUY" atau "SELL"
+            minutes   : window dedup dalam menit (default 30)
+
+        Returns:
+            True  → signal sudah dikirim recently, SKIP notif
+            False → signal baru atau sudah expired, KIRIM notif
+        """
+        try:
+            cutoff = (
+                datetime.now() - timedelta(minutes=minutes)
+            ).isoformat()
+
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                if self.use_postgres:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM signals
+                        WHERE pair      = %s
+                          AND direction = %s
+                          AND notified  = 1
+                          AND detected_at > %s
+                    """, (pair, direction, cutoff))
+                else:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM signals
+                        WHERE pair      = ?
+                          AND direction = ?
+                          AND notified  = 1
+                          AND detected_at > ?
+                    """, (pair, direction, cutoff))
+
+                count = cursor.fetchone()[0]
+                return count > 0
+
+        except Exception as e:
+            logger.error(f"❌ is_signal_recent error: {e}")
+            # Kalau error, anggap recent → tidak spam
+            return True
+
+    def mark_signal_notified(self, pair: str,
+                             direction: str):
+        """
+        Tandai signal pair+direction sebagai sudah
+        dikirim notif. Dipanggil setelah
+        telegram.send_signal_detected() berhasil.
+        """
+        try:
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                if self.use_postgres:
+                    cursor.execute("""
+                        UPDATE signals SET notified = 1
+                        WHERE pair      = %s
+                          AND direction = %s
+                          AND id = (
+                              SELECT id FROM signals
+                              WHERE pair      = %s
+                                AND direction = %s
+                              ORDER BY detected_at DESC
+                              LIMIT 1
+                          )
+                    """, (pair, direction, pair, direction))
+                else:
+                    cursor.execute("""
+                        UPDATE signals SET notified = 1
+                        WHERE pair      = ?
+                          AND direction = ?
+                          AND id = (
+                              SELECT id FROM signals
+                              WHERE pair      = ?
+                                AND direction = ?
+                              ORDER BY detected_at DESC
+                              LIMIT 1
+                          )
+                    """, (pair, direction, pair, direction))
+                conn.commit()
+        except Exception as e:
+            logger.error(
+                f"❌ mark_signal_notified error: {e}"
+            )
+
     def save_signal(self, signal: dict):
-        """Simpan signal"""
+        """Simpan signal ke database"""
         try:
             with self._connect() as conn:
                 cursor = conn.cursor()
@@ -513,14 +632,17 @@ class Database:
                             entry_zone, sl_zone, tp_zone,
                             fib_level, ob_detected,
                             fvg_detected, bos_detected,
-                            killzone, detected_at
-                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            killzone, detected_at, notified
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,
+                                  %s,%s,%s,%s,%s,%s,%s)
                     """, (
                         signal.get("pair"),
                         signal.get("direction"),
                         signal.get("tf_entry", "15m"),
                         signal.get("confluence_score"),
-                        json.dumps(signal.get("score_breakdown", {})),
+                        json.dumps(
+                            signal.get("score_breakdown", {})
+                        ),
                         signal.get("entry_price"),
                         signal.get("sl_price"),
                         signal.get("tp2_price"),
@@ -529,7 +651,8 @@ class Database:
                         int(signal.get("fvg_detected", False)),
                         int(signal.get("bos_detected", False)),
                         signal.get("killzone"),
-                        datetime.now().isoformat()
+                        datetime.now().isoformat(),
+                        0  # notified = False by default
                     ))
                 else:
                     cursor.execute("""
@@ -539,14 +662,16 @@ class Database:
                             entry_zone, sl_zone, tp_zone,
                             fib_level, ob_detected,
                             fvg_detected, bos_detected,
-                            killzone, detected_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            killzone, detected_at, notified
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (
                         signal.get("pair"),
                         signal.get("direction"),
                         signal.get("tf_entry", "15m"),
                         signal.get("confluence_score"),
-                        json.dumps(signal.get("score_breakdown", {})),
+                        json.dumps(
+                            signal.get("score_breakdown", {})
+                        ),
                         signal.get("entry_price"),
                         signal.get("sl_price"),
                         signal.get("tp2_price"),
@@ -555,7 +680,8 @@ class Database:
                         int(signal.get("fvg_detected", False)),
                         int(signal.get("bos_detected", False)),
                         signal.get("killzone"),
-                        datetime.now().isoformat()
+                        datetime.now().isoformat(),
+                        0  # notified = False by default
                     ))
                 conn.commit()
         except Exception as e:

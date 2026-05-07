@@ -248,7 +248,7 @@ class SMCAnalysis:
                     next_bullish = next_c["close"] > next_c["open"]
                     strong_move  = (
                         (next_c["close"] - next_c["open"]) >
-                        (curr["open"] - curr["close"]) * 1.5
+                        (curr["open"] - curr["close"]) * 1.2
                     )
 
                     if is_bearish and next_bullish and strong_move:
@@ -268,7 +268,7 @@ class SMCAnalysis:
                     next_bearish = next_c["close"] < next_c["open"]
                     strong_move  = (
                         (next_c["open"] - next_c["close"]) >
-                        (curr["close"] - curr["open"]) * 1.5
+                        (curr["close"] - curr["open"]) * 1.2
                     )
 
                     if is_bullish and next_bearish and strong_move:

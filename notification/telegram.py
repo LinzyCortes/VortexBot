@@ -2,6 +2,7 @@
 # VORTEX BOT - TELEGRAM NOTIFICATION SYSTEM
 # ============================================
 
+import time
 import requests
 import threading
 from datetime import datetime, timezone, timedelta
@@ -28,10 +29,11 @@ class TelegramNotifier:
         self.base_url = (
             f"https://api.telegram.org/bot{self.token}"
         )
-        self.enabled      = bool(self.token and self.chat_id)
-        self.last_update  = 0
-        self.bot_ref      = None
-        self._polling     = False
+        self.enabled        = bool(self.token and self.chat_id)
+        self.last_update    = 0
+        self.bot_ref        = None
+        self._polling       = False
+        self.last_scan_time = None   # ← heartbeat tracker
 
     # ─── SEND ───────────────────────────────
 
@@ -90,7 +92,6 @@ class TelegramNotifier:
                     self._handle_update(update)
             except Exception as e:
                 logger.debug(f"Poll error: {e}")
-            import time
             time.sleep(3)
 
     def _get_updates(self) -> list:
@@ -165,6 +166,13 @@ class TelegramNotifier:
                 consec  = risk_manager.get_consecutive_losses()
                 recover = bool(db.get_state("recovery_mode"))
 
+                # Heartbeat info
+                if self.last_scan_time:
+                    elapsed = time.time() - self.last_scan_time
+                    hb_str  = f"{elapsed/60:.1f} menit lalu"
+                else:
+                    hb_str = "Belum ada scan"
+
                 return (
                     f"🤖 <b>BOT STATUS</b>\n"
                     f"{'='*30}\n"
@@ -173,6 +181,7 @@ class TelegramNotifier:
                     f"Mode       : {self._get_mode(balance)}\n"
                     f"Consec Loss: {consec}\n"
                     f"Recovery   : {'ON' if recover else 'OFF'}\n"
+                    f"Last Scan  : {hb_str}\n"
                     f"{'='*30}\n"
                     f"⏰ {_wib_str()}"
                 )
@@ -328,34 +337,13 @@ class TelegramNotifier:
 
     def send_news_block(self, pairs: list, news_list: list,
                         safe_resume: str):
-        """
-        Notif saat news memblokir trading.
-
-        Args:
-            pairs       : list pair yang di-skip, e.g. ["BTC-USDT", "ETH-USDT"]
-            news_list   : list dict dari get_blocking_news()["news_list"]
-                          setiap item: {"title", "country", "safe_at_wib"}
-            safe_resume : string jam WIB aman lagi, e.g. "17:30 WIB"
-
-        Contoh output Telegram:
-            ⚠️ NEWS BLOCK
-            ══════════════════════════════════════
-            BTC-USDT & ETH-USDT di-skip
-
-            📰 News Aktif:
-              • FOMC Minutes (USD, High)
-              • CPI Data (USD, High)
-
-            ✅ Aman lagi jam: 17:30 WIB
-            ⏰ 16:58:22 WIB
-        """
         try:
             pairs_str = " & ".join(pairs) if pairs else "Semua pair"
 
             news_lines = ""
             for n in news_list:
-                title      = n.get("title", "Unknown")
-                country    = n.get("country", "")
+                title       = n.get("title", "Unknown")
+                country     = n.get("country", "")
                 country_str = f", {country}" if country else ""
                 news_lines += f"  • {title} (High{country_str})\n"
 
@@ -384,30 +372,7 @@ class TelegramNotifier:
     def send_killzone_alert(self, event: str, session: str,
                             wib_time: str,
                             minutes_left: int = 0):
-        """
-        Notif saat masuk atau keluar killzone.
-
-        Args:
-            event        : "started" atau "ended"
-            session      : nama sesi, e.g. "London Killzone"
-            wib_time     : jam WIB saat ini, e.g. "15:00 WIB"
-            minutes_left : menit tersisa (hanya relevan saat event=started)
-
-        Contoh output (started):
-            🟢 LONDON KILLZONE DIMULAI
-            ══════════════════════════════════════
-            Jam    : 15:00 WIB
-            Durasi : ±2j 30m
-            🎯 Bot mulai hunting setup...
-
-        Contoh output (ended):
-            🔴 LONDON KILLZONE SELESAI
-            ══════════════════════════════════════
-            Jam    : 17:30 WIB
-            😴 Bot kembali standby...
-        """
         try:
-            # Buat nama sesi uppercase tanpa kata "KILLZONE" untuk header
             session_upper = session.upper().replace(" KILLZONE", "")
 
             if event == "started":
@@ -446,24 +411,49 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"❌ send_killzone_alert error: {e}")
 
+    # ─── NEW: HEARTBEAT ──────────────────────
+
+    def update_last_scan(self):
+        """Dipanggil setiap kali bot selesai scan"""
+        self.last_scan_time = time.time()
+
+    def check_heartbeat(self):
+        """
+        Cek apakah bot masih hidup.
+        Kalau tidak scan lebih dari 5 menit → kirim alert.
+        Dipanggil dari main loop setiap iterasi.
+        """
+        if self.last_scan_time is None:
+            return
+        elapsed = time.time() - self.last_scan_time
+        if elapsed > 300:  # 5 menit = 300 detik
+            logger.warning(
+                f"🚨 Heartbeat missed! "
+                f"Last scan {elapsed/60:.1f} menit lalu"
+            )
+            self.send_heartbeat_alert()
+            # Reset timer biar tidak spam
+            self.last_scan_time = time.time()
+
+    def send_heartbeat_alert(self):
+        """Alert kalau bot tidak scan lebih dari 5 menit"""
+        msg = (
+            f"🚨 <b>HEARTBEAT ALERT!</b>\n"
+            f"{'='*35}\n"
+            f"⚠️ Bot tidak scan lebih dari 5 menit!\n"
+            f"Kemungkinan: crash, stuck, atau error.\n"
+            f"{'='*35}\n"
+            f"🔧 Cek Railway logs segera!\n"
+            f"📱 /status untuk cek kondisi bot\n"
+            f"⏰ {_wib_str()}"
+        )
+        self.send(msg)
+
     # ─── EXISTING NOTIFICATIONS ─────────────
 
     def send_morning_briefing(self, balance: float,
                                upcoming_news: list,
                                market_regime: str):
-        """
-        Morning briefing — dikirim jam 07:00 WIB.
-
-        Jadwal pantau harian:
-          07:00 WIB  Morning Briefing (ini)
-          14:45 WIB  Pre-London Buffer
-          15:00 WIB  London Killzone MULAI
-          17:30 WIB  London Killzone SELESAI
-          20:15 WIB  Pre-NY Buffer
-          20:30 WIB  New York Killzone MULAI
-          23:00 WIB  New York Killzone SELESAI
-          22:00 WIB  Daily Summary
-        """
         now = _wib_now()
 
         news_text = ""

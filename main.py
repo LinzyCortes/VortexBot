@@ -417,8 +417,6 @@ class VortexBot:
             db.save_signal(signal)
 
             # ── DUPLICATE SIGNAL GUARD ───────────────────────────────────────
-            # Notif Telegram hanya dikirim sekali per sinyal unik (pair+direction).
-            # Trade execution tetap jalan meskipun notif di-skip.
             if not db.is_signal_recent(pair, direction):
                 telegram.send_signal_detected(signal)
                 db.mark_signal_notified(pair, direction)
@@ -956,6 +954,10 @@ class VortexBot:
             try:
                 schedule.run_pending()
 
+                # ── HEARTBEAT CHECK ───────────────────────────────────────────
+                # Cek di awal loop — kalau bot stuck >5 menit, alert langsung
+                telegram.check_heartbeat()
+
                 pause = risk_manager.is_bot_paused()
                 if pause.get("paused"):
                     logger.info(
@@ -993,6 +995,10 @@ class VortexBot:
                         signals_found += 1
                         self.execute_trade(signal)
                     time.sleep(2)
+
+                # ── UPDATE HEARTBEAT ──────────────────────────────────────────
+                # Dipanggil setelah scan selesai — tandai bot masih hidup
+                telegram.update_last_scan()
 
                 t_wib = now_wib()
                 t_utc = now_utc()

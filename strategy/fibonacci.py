@@ -22,16 +22,16 @@ class FibonacciEngine:
         """
         try:
             recent = df.tail(lookback)
-            
+
             if direction == "BUY":
                 # Untuk BUY: cari swing low (start)
                 # ke swing high (end) — harga retrace turun
                 swing_low_idx  = recent["low"].idxmin()
                 swing_high_idx = recent["high"].idxmax()
-                
+
                 swing_low  = recent.loc[swing_low_idx,  "low"]
                 swing_high = recent.loc[swing_high_idx, "high"]
-                
+
                 # Pastikan swing low sebelum swing high
                 if swing_low_idx < swing_high_idx:
                     return {
@@ -41,16 +41,16 @@ class FibonacciEngine:
                         "swing_end"  : swing_high,
                         "swing_range": swing_high - swing_low,
                     }
-                    
+
             elif direction == "SELL":
                 # Untuk SELL: cari swing high (start)
                 # ke swing low (end)
                 swing_high_idx = recent["high"].idxmax()
                 swing_low_idx  = recent["low"].idxmin()
-                
+
                 swing_high = recent.loc[swing_high_idx, "high"]
                 swing_low  = recent.loc[swing_low_idx,  "low"]
-                
+
                 # Pastikan swing high sebelum swing low
                 if swing_high_idx < swing_low_idx:
                     return {
@@ -77,24 +77,24 @@ class FibonacciEngine:
         """
         try:
             swing = self.find_last_swing(df, direction)
-            
+
             if not swing.get("valid"):
                 return {"valid": False}
 
-            start = swing["swing_start"]
-            end   = swing["swing_end"]
-            range_= swing["swing_range"]
+            start  = swing["swing_start"]
+            end    = swing["swing_end"]
+            range_ = swing["swing_range"]
 
             if direction == "BUY":
                 # Retracement: dari high ke bawah
                 retracement = {
-                    "0.0"  : end,    # Swing High (100%)
+                    "0.0"  : end,
                     "0.236": end - range_ * 0.236,
                     "0.382": end - range_ * 0.382,
                     "0.500": end - range_ * 0.500,  # ⭐ Penting
                     "0.618": end - range_ * 0.618,  # ⭐ Golden Ratio
                     "0.786": end - range_ * 0.786,
-                    "1.0"  : start,  # Swing Low (0%)
+                    "1.0"  : start,
                 }
                 # Extension: target TP di atas swing high
                 extension = {
@@ -108,13 +108,13 @@ class FibonacciEngine:
             else:  # SELL
                 # Retracement: dari low ke atas
                 retracement = {
-                    "0.0"  : end,    # Swing Low (100%)
+                    "0.0"  : end,
                     "0.236": end + range_ * 0.236,
                     "0.382": end + range_ * 0.382,
                     "0.500": end + range_ * 0.500,  # ⭐
                     "0.618": end + range_ * 0.618,  # ⭐ Golden Ratio
                     "0.786": end + range_ * 0.786,
-                    "1.0"  : start,  # Swing High (0%)
+                    "1.0"  : start,
                 }
                 # Extension: target TP di bawah swing low
                 extension = {
@@ -126,21 +126,21 @@ class FibonacciEngine:
                 }
 
             return {
-                "valid"       : True,
-                "direction"   : direction,
-                "swing_start" : start,
-                "swing_end"   : end,
-                "range"       : range_,
-                "retracement" : retracement,
-                "extension"   : extension,
+                "valid"      : True,
+                "direction"  : direction,
+                "swing_start": start,
+                "swing_end"  : end,
+                "range"      : range_,
+                "retracement": retracement,
+                "extension"  : extension,
 
                 # Level penting langsung
-                "fib_50"      : retracement["0.500"],
-                "fib_618"     : retracement["0.618"],
-                "fib_786"     : retracement["0.786"],
-                "tp1"         : extension["1.272"],
-                "tp2"         : extension["1.618"],
-                "tp3"         : extension["2.618"],
+                "fib_50" : retracement["0.500"],
+                "fib_618": retracement["0.618"],
+                "fib_786": retracement["0.786"],
+                "tp1"    : extension["1.272"],
+                "tp2"    : extension["1.618"],
+                "tp3"    : extension["2.618"],
             }
 
         except Exception as e:
@@ -152,36 +152,59 @@ class FibonacciEngine:
     def get_nearest_fib_level(self,
                                price: float,
                                fib_levels: dict,
-                               tolerance_pct: float = 0.3
+                               tolerance_pct: float = 1.0
                                ) -> dict:
         """
-        Cek level fibonacci terdekat dengan harga
-        Tolerance: 0.3% dari harga
+        Cek level fibonacci terdekat dengan harga.
+
+        FIX: Tolerance dinaikkan dari 0.3% → 1.0%
+        Alasan: Dengan 0.3%, BTC di $94k hanya punya
+        window $282 — hampir tidak pernah terpenuhi saat
+        scan tiap 60 detik. Dengan 1.0% window jadi ~$940,
+        realistis untuk timeframe 15m.
         """
         try:
             retracement = fib_levels.get("retracement", {})
-            tolerance   = price * (tolerance_pct / 100)
+
+            # ── FIX: tolerance 0.3% → 1.0% ──────────────────────────────────
+            tolerance = price * (tolerance_pct / 100)
+
+            best_match  = None
+            best_dist   = float("inf")
 
             for level_name, level_price in retracement.items():
-                if abs(price - level_price) <= tolerance:
-                    # Tentukan kekuatan level
-                    if level_name in ["0.618", "0.500"]:
-                        strength = "STRONG"
-                        score    = 2
-                    elif level_name in ["0.382", "0.786"]:
-                        strength = "MEDIUM"
-                        score    = 1
-                    else:
-                        strength = "WEAK"
-                        score    = 0
+                dist = abs(price - level_price)
+                if dist <= tolerance and dist < best_dist:
+                    best_dist  = dist
+                    best_match = level_name
 
-                    return {
-                        "at_fib"   : True,
-                        "level"    : level_name,
-                        "price"    : level_price,
-                        "strength" : strength,
-                        "score"    : score,
-                    }
+            if best_match:
+                level_price = retracement[best_match]
+
+                # Tentukan kekuatan level
+                if best_match in ["0.618", "0.500"]:
+                    strength = "STRONG"
+                    score    = 2
+                elif best_match in ["0.382", "0.786"]:
+                    strength = "MEDIUM"
+                    score    = 1
+                else:
+                    strength = "WEAK"
+                    score    = 0
+
+                logger.debug(
+                    f"📐 Fib match: {best_match} | "
+                    f"price={price:.2f} level={level_price:.2f} | "
+                    f"dist={best_dist:.2f} tol={tolerance:.2f}"
+                )
+
+                return {
+                    "at_fib"  : True,
+                    "level"   : best_match,
+                    "price"   : level_price,
+                    "strength": strength,
+                    "score"   : score,
+                }
 
             return {
                 "at_fib"  : False,
@@ -220,58 +243,50 @@ class FibonacciEngine:
             atr_multiplier = 1.5
 
             if direction == "BUY":
-                # SL di bawah entry minus ATR
                 sl_atr = entry - (atr * atr_multiplier)
 
-                # Kalau ada liquidity level (SSL),
-                # SL tepat di bawahnya
                 if liquidity_level and liquidity_level < entry:
                     sl = min(sl_atr, liquidity_level * 0.999)
                 else:
                     sl = sl_atr
 
-                # Validasi TP minimal RR 1:3
-                risk   = entry - sl
-                rr1    = (tp1 - entry) / risk if risk > 0 else 0
-                rr2    = (tp2 - entry) / risk if risk > 0 else 0
-                rr3    = (tp3 - entry) / risk if risk > 0 else 0
+                risk = entry - sl
+                rr1  = (tp1 - entry) / risk if risk > 0 else 0
+                rr2  = (tp2 - entry) / risk if risk > 0 else 0
+                rr3  = (tp3 - entry) / risk if risk > 0 else 0
 
-                # Kalau RR tp2 < 3, skip setup ini
                 if rr2 < cfg.MIN_RR:
-                    # Coba perlebar TP
                     tp2 = entry + (risk * cfg.MIN_RR)
                     rr2 = cfg.MIN_RR
 
             else:  # SELL
-                # SL di atas entry plus ATR
                 sl_atr = entry + (atr * atr_multiplier)
 
-                # Kalau ada BSL di atas, SL tepat di atasnya
                 if liquidity_level and liquidity_level > entry:
                     sl = max(sl_atr, liquidity_level * 1.001)
                 else:
                     sl = sl_atr
 
-                risk   = sl - entry
-                rr1    = (entry - tp1) / risk if risk > 0 else 0
-                rr2    = (entry - tp2) / risk if risk > 0 else 0
-                rr3    = (entry - tp3) / risk if risk > 0 else 0
+                risk = sl - entry
+                rr1  = (entry - tp1) / risk if risk > 0 else 0
+                rr2  = (entry - tp2) / risk if risk > 0 else 0
+                rr3  = (entry - tp3) / risk if risk > 0 else 0
 
                 if rr2 < cfg.MIN_RR:
                     tp2 = entry - (risk * cfg.MIN_RR)
                     rr2 = cfg.MIN_RR
 
             return {
-                "entry"    : entry,
-                "sl"       : round(sl, 4),
-                "tp1"      : round(tp1, 4),
-                "tp2"      : round(tp2, 4),
-                "tp3"      : round(tp3, 4),
-                "risk"     : round(risk, 4),
-                "rr1"      : round(rr1, 2),
-                "rr2"      : round(rr2, 2),
-                "rr3"      : round(rr3, 2),
-                "sl_type"  : "Liquidity + ATR",
+                "entry"  : entry,
+                "sl"     : round(sl,  4),
+                "tp1"    : round(tp1, 4),
+                "tp2"    : round(tp2, 4),
+                "tp3"    : round(tp3, 4),
+                "risk"   : round(risk, 4),
+                "rr1"    : round(rr1, 2),
+                "rr2"    : round(rr2, 2),
+                "rr3"    : round(rr3, 2),
+                "sl_type": "Liquidity + ATR",
             }
 
         except Exception as e:
@@ -285,40 +300,33 @@ class FibonacciEngine:
                              tp_sl: dict,
                              direction: str) -> dict:
         """
-        Sesuaikan RR dengan kondisi market
-        Bot menyesuaikan TP jika ada momentum kuat
+        Sesuaikan RR dengan kondisi market.
+        Bot menyesuaikan TP jika ada momentum kuat.
         """
         try:
             if not tp_sl:
                 return tp_sl
 
-            # Cek momentum terakhir
             recent_range = (
                 df["high"].tail(5).max() -
                 df["low"].tail(5).min()
             )
-            atr_val = df["close"].tail(14).std()
-
-            # Momentum ratio
+            atr_val  = df["close"].tail(14).std()
             momentum = recent_range / atr_val if atr_val > 0 else 1
 
             entry = tp_sl["entry"]
-            sl    = tp_sl["sl"]
             risk  = tp_sl["risk"]
 
             if direction == "BUY":
                 if momentum > 2.0:
-                    # Momentum kuat → gunakan TP3
                     tp_sl["active_tp"] = tp_sl["tp3"]
                     tp_sl["active_rr"] = tp_sl["rr3"]
                     tp_sl["momentum"]  = "STRONG"
                 elif momentum > 1.5:
-                    # Momentum normal → TP2
                     tp_sl["active_tp"] = tp_sl["tp2"]
                     tp_sl["active_rr"] = tp_sl["rr2"]
                     tp_sl["momentum"]  = "NORMAL"
                 else:
-                    # Momentum lemah → TP1 konservatif
                     tp_sl["active_tp"] = tp_sl["tp1"]
                     tp_sl["active_rr"] = tp_sl["rr1"]
                     tp_sl["momentum"]  = "WEAK"
@@ -336,7 +344,7 @@ class FibonacciEngine:
                     tp_sl["active_rr"] = tp_sl["rr1"]
                     tp_sl["momentum"]  = "WEAK"
 
-            # Pastikan minimal RR 1:3
+            # Pastikan minimal RR terpenuhi
             if tp_sl.get("active_rr", 0) < cfg.MIN_RR:
                 tp_sl["active_rr"] = cfg.MIN_RR
                 if direction == "BUY":
@@ -369,14 +377,15 @@ class FibonacciEngine:
 
             if not fib_levels.get("valid"):
                 return {
-                    "valid"        : False,
-                    "at_fib"       : False,
-                    "fib_score"    : 0,
+                    "valid"    : False,
+                    "at_fib"   : False,
+                    "fib_score": 0,
                 }
 
             # Cek apakah harga di level fib penting
             nearest = self.get_nearest_fib_level(
                 current_price, fib_levels
+                # tolerance_pct default sekarang 1.0%
             )
 
             # Hitung TP & SL

@@ -66,7 +66,7 @@ class VortexBot:
         self.name        = "VΦrtex Bot"
         self.version     = "1.0"
         self.running     = False
-        self.start_time  = None   # disimpan dalam UTC
+        self.start_time  = None
         self.pairs       = cfg.PAIRS
         self.open_trades = {}
 
@@ -111,6 +111,19 @@ class VortexBot:
         risk_manager.set_starting_balance(balance)
         self._set_period_balances(balance)
 
+        # ── FIX: Sync virtual balance ke exchange balance saat startup ────────
+        # Ini root cause balance tidak berubah setelah loss.
+        # Virtual balance di DB bisa tidak sync kalau bot restart.
+        # Solusi: kalau OKX demo, pastikan virtual balance di-init
+        # dari nilai yang benar saat startup.
+        if cfg.IS_OKX and cfg.IS_OKX_DEMO:
+            vb = risk_manager.get_virtual_balance()
+            from exchange.okx import okx as _okx
+            _okx._virtual_balance = vb
+            logger.info(
+                f"💰 Virtual balance synced at startup: ${vb:.4f}"
+            )
+
         tg_ok = telegram.test_connection()
         if not tg_ok:
             logger.warning(
@@ -119,7 +132,6 @@ class VortexBot:
             )
 
         telegram.send_bot_started(balance)
-
         telegram.start_polling(bot_ref=self)
         logger.info("📱 Telegram commands active!")
 
@@ -449,6 +461,18 @@ class VortexBot:
             tp2       = signal.get("tp2_price")
             tp3       = signal.get("tp3_price")
 
+            # ── NEW: SL COOLDOWN CHECK ────────────────────────────────────────
+            # Cek apakah pair+direction ini baru kena SL.
+            # Kalau masih dalam cooldown (2 jam), skip entry.
+            cooldown = db.is_pair_in_cooldown(pair, direction)
+            if cooldown.get("in_cooldown"):
+                logger.info(
+                    f"⏭️ {pair} {direction} dalam SL cooldown | "
+                    f"Sisa: {cooldown.get('minutes_left')} mnt | "
+                    f"Sampai: {cooldown.get('until')}"
+                )
+                return
+
             balance    = exchange.get_balance().get("free", 0)
             risk_check = risk_manager.full_risk_check(balance)
 
@@ -588,11 +612,11 @@ class VortexBot:
                     atr    = ind.get("atr", 0)
 
                 partial = risk_manager.should_partial_close(
-                    entry    =entry,
-                    current  =current,
-                    tp1      =tp1,
-                    tp2      =tp2,
-                    direction=direction,
+                    entry     =entry,
+                    current   =current,
+                    tp1       =tp1,
+                    tp2       =tp2,
+                    direction =direction,
                     closed_tp1=tp1_closed,
                 )
                 if partial.get("should_close"):
@@ -727,12 +751,32 @@ class VortexBot:
             }
             db.close_trade(trade_id, close_data)
 
+            # ── FIX: Virtual balance update + sync ke okx instance ────────────
+            # Sebelumnya new_balance diambil dari exchange (selalu 0 di demo).
+            # Sekarang virtual balance di-update dulu, lalu disync ke okx._virtual_balance
+            # supaya /balance command juga tampil benar.
             if cfg.IS_OKX and cfg.IS_OKX_DEMO:
                 new_bal = risk_manager.update_virtual_balance_after_trade(pnl)
                 risk_manager.release_balance(trade.get("risk_amount", 0))
-                from exchange.okx import okx
-                okx._virtual_balance      = new_bal
+                from exchange.okx import okx as _okx
+                _okx._virtual_balance     = new_bal
                 close_data["new_balance"] = new_bal
+                new_balance               = new_bal
+                logger.info(
+                    f"💰 Virtual balance updated: ${new_bal:.4f} "
+                    f"(pnl={'+' if pnl >= 0 else ''}{pnl:.4f})"
+                )
+
+            # ── NEW: SL COOLDOWN — set setelah trade kena SL ─────────────────
+            # Kalau close reason SL, blokir entry pair+direction
+            # yang sama selama 2 jam. Ini fix root cause bot
+            # entry ulang terus setelah kena SL.
+            if reason == "SL":
+                db.set_sl_cooldown(pair, direction, cooldown_hours=2)
+                logger.warning(
+                    f"🚫 SL hit → cooldown 2j untuk "
+                    f"{pair} {direction}"
+                )
 
             close_text = journal.generate_close_reason(trade, close_data)
             journal.save_trade_journal(
@@ -748,6 +792,15 @@ class VortexBot:
                 trade,
                 {**close_data, "new_balance": new_balance}
             )
+
+            # ── NEW: TRIGGER LEARNING setelah trade loss ──────────────────────
+            # Setelah trade close dengan loss, langsung jalankan
+            # analisis pattern loss supaya bot belajar dari kesalahan.
+            if pnl < 0:
+                try:
+                    evaluator.analyze_loss_pattern()
+                except Exception as le:
+                    logger.debug(f"Learning trigger error: {le}")
 
             if trade_id in self.open_trades:
                 del self.open_trades[trade_id]
@@ -955,7 +1008,6 @@ class VortexBot:
                 schedule.run_pending()
 
                 # ── HEARTBEAT CHECK ───────────────────────────────────────────
-                # Cek di awal loop — kalau bot stuck >5 menit, alert langsung
                 telegram.check_heartbeat()
 
                 pause = risk_manager.is_bot_paused()
@@ -997,7 +1049,6 @@ class VortexBot:
                     time.sleep(2)
 
                 # ── UPDATE HEARTBEAT ──────────────────────────────────────────
-                # Dipanggil setelah scan selesai — tandai bot masih hidup
                 telegram.update_last_scan()
 
                 t_wib = now_wib()

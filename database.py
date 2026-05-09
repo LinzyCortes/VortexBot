@@ -114,6 +114,16 @@ class Database:
                             notified         INTEGER DEFAULT 0
                         )
                     """)
+                    # ── NEW: SL cooldown table ────────────────────────────────
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS sl_cooldown (
+                            id             SERIAL PRIMARY KEY,
+                            pair           TEXT NOT NULL,
+                            direction      TEXT NOT NULL,
+                            sl_hit_at      TEXT NOT NULL,
+                            cooldown_until TEXT NOT NULL
+                        )
+                    """)
                 else:
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS trades (
@@ -180,6 +190,16 @@ class Database:
                             detected_at      TEXT NOT NULL,
                             acted_on         INTEGER DEFAULT 0,
                             notified         INTEGER DEFAULT 0
+                        )
+                    """)
+                    # ── NEW: SL cooldown table ────────────────────────────────
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS sl_cooldown (
+                            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                            pair           TEXT NOT NULL,
+                            direction      TEXT NOT NULL,
+                            sl_hit_at      TEXT NOT NULL,
+                            cooldown_until TEXT NOT NULL
                         )
                     """)
 
@@ -516,35 +536,107 @@ class Database:
             logger.error(f"❌ Get state error {key}: {e}")
             return default
 
+    # ─── SL COOLDOWN ────────────────────────
+
+    def set_sl_cooldown(self, pair: str,
+                        direction: str,
+                        cooldown_hours: int = 2):
+        """
+        Catat bahwa pair+direction kena SL.
+        Bot tidak boleh entry pair yang sama
+        dalam cooldown_hours jam ke depan.
+
+        Dipanggil dari main._close_trade() saat reason == 'SL'.
+        """
+        try:
+            now            = datetime.now()
+            cooldown_until = (
+                now + timedelta(hours=cooldown_hours)
+            ).isoformat()
+
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                if self.use_postgres:
+                    cursor.execute("""
+                        INSERT INTO sl_cooldown
+                            (pair, direction, sl_hit_at, cooldown_until)
+                        VALUES (%s, %s, %s, %s)
+                    """, (pair, direction,
+                          now.isoformat(), cooldown_until))
+                else:
+                    cursor.execute("""
+                        INSERT INTO sl_cooldown
+                            (pair, direction, sl_hit_at, cooldown_until)
+                        VALUES (?, ?, ?, ?)
+                    """, (pair, direction,
+                          now.isoformat(), cooldown_until))
+                conn.commit()
+
+            logger.warning(
+                f"🚫 SL cooldown set: {pair} {direction} | "
+                f"Cooldown {cooldown_hours}j hingga "
+                f"{cooldown_until[:16]}"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ set_sl_cooldown error: {e}")
+
+    def is_pair_in_cooldown(self, pair: str,
+                            direction: str) -> dict:
+        """
+        Cek apakah pair+direction sedang cooldown setelah SL.
+
+        Returns:
+            {"in_cooldown": False} — aman untuk entry
+            {"in_cooldown": True, "minutes_left": 45,
+             "until": "17:30 WIB"} — skip entry
+        """
+        try:
+            now = datetime.now()
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                if self.use_postgres:
+                    cursor.execute("""
+                        SELECT cooldown_until FROM sl_cooldown
+                        WHERE pair      = %s
+                          AND direction = %s
+                          AND cooldown_until > %s
+                        ORDER BY cooldown_until DESC
+                        LIMIT 1
+                    """, (pair, direction, now.isoformat()))
+                else:
+                    cursor.execute("""
+                        SELECT cooldown_until FROM sl_cooldown
+                        WHERE pair      = ?
+                          AND direction = ?
+                          AND cooldown_until > ?
+                        ORDER BY cooldown_until DESC
+                        LIMIT 1
+                    """, (pair, direction, now.isoformat()))
+
+                row = cursor.fetchone()
+                if not row:
+                    return {"in_cooldown": False}
+
+                until     = datetime.fromisoformat(row[0])
+                time_left = until - now
+                mins_left = int(time_left.total_seconds() / 60)
+
+                return {
+                    "in_cooldown" : True,
+                    "minutes_left": mins_left,
+                    "until"       : until.strftime("%H:%M WIB"),
+                }
+
+        except Exception as e:
+            logger.error(f"❌ is_pair_in_cooldown error: {e}")
+            return {"in_cooldown": False}
+
     # ─── SIGNALS ────────────────────────────
 
     def is_signal_recent(self, pair: str,
                          direction: str,
                          minutes: int = 30) -> bool:
-        """
-        Cek apakah signal pair+direction yang sama
-        sudah dikirim notif dalam X menit terakhir.
-
-        FIX: Ini root cause spam Telegram.
-        Bot scan tiap 60 detik — kalau signal BTC BUY
-        valid terus selama killzone, tanpa dedup ini
-        notif dikirim tiap menit → 38 notif per sesi.
-
-        Logic:
-        - Cek tabel signals untuk pair+direction
-        - Kalau ada record dengan notified=1 dalam
-          'minutes' menit terakhir → return True (skip)
-        - Kalau tidak ada atau sudah lewat window → False
-
-        Args:
-            pair      : e.g. "BTC-USDT-SWAP"
-            direction : "BUY" atau "SELL"
-            minutes   : window dedup dalam menit (default 30)
-
-        Returns:
-            True  → signal sudah dikirim recently, SKIP notif
-            False → signal baru atau sudah expired, KIRIM notif
-        """
         try:
             cutoff = (
                 datetime.now() - timedelta(minutes=minutes)
@@ -574,16 +666,10 @@ class Database:
 
         except Exception as e:
             logger.error(f"❌ is_signal_recent error: {e}")
-            # Kalau error, anggap recent → tidak spam
             return True
 
     def mark_signal_notified(self, pair: str,
                              direction: str):
-        """
-        Tandai signal pair+direction sebagai sudah
-        dikirim notif. Dipanggil setelah
-        telegram.send_signal_detected() berhasil.
-        """
         try:
             with self._connect() as conn:
                 cursor = conn.cursor()
@@ -652,7 +738,7 @@ class Database:
                         int(signal.get("bos_detected", False)),
                         signal.get("killzone"),
                         datetime.now().isoformat(),
-                        0  # notified = False by default
+                        0
                     ))
                 else:
                     cursor.execute("""
@@ -681,11 +767,48 @@ class Database:
                         int(signal.get("bos_detected", False)),
                         signal.get("killzone"),
                         datetime.now().isoformat(),
-                        0  # notified = False by default
+                        0
                     ))
                 conn.commit()
         except Exception as e:
             logger.error(f"❌ Save signal error: {e}")
+
+    # ─── LEARNING: LOSS PATTERN ─────────────
+
+    def get_recent_loss_patterns(self,
+                                  limit: int = 20) -> list:
+        """
+        Ambil trade loss terbaru untuk analisis pattern.
+        Dipakai oleh evaluator untuk learning.
+        """
+        try:
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                ph = "%s" if self.use_postgres else "?"
+                cursor.execute(f"""
+                    SELECT pair, direction, confluence_score,
+                           close_reason, pnl, open_time,
+                           rr_achieved
+                    FROM trades
+                    WHERE pnl < 0
+                      AND status != {ph}
+                    ORDER BY open_time DESC
+                    LIMIT {ph}
+                """, ("OPEN", limit))
+                cols = [
+                    "pair", "direction", "confluence_score",
+                    "close_reason", "pnl", "open_time",
+                    "rr_achieved"
+                ]
+                return [
+                    dict(zip(cols, r))
+                    for r in cursor.fetchall()
+                ]
+        except Exception as e:
+            logger.error(
+                f"❌ get_recent_loss_patterns error: {e}"
+            )
+            return []
 
 
 # Instance siap pakai

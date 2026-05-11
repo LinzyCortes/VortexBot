@@ -24,15 +24,12 @@ class FibonacciEngine:
             recent = df.tail(lookback)
 
             if direction == "BUY":
-                # Untuk BUY: cari swing low (start)
-                # ke swing high (end) — harga retrace turun
                 swing_low_idx  = recent["low"].idxmin()
                 swing_high_idx = recent["high"].idxmax()
 
                 swing_low  = recent.loc[swing_low_idx,  "low"]
                 swing_high = recent.loc[swing_high_idx, "high"]
 
-                # Pastikan swing low sebelum swing high
                 if swing_low_idx < swing_high_idx:
                     return {
                         "valid"      : True,
@@ -43,15 +40,12 @@ class FibonacciEngine:
                     }
 
             elif direction == "SELL":
-                # Untuk SELL: cari swing high (start)
-                # ke swing low (end)
                 swing_high_idx = recent["high"].idxmax()
                 swing_low_idx  = recent["low"].idxmin()
 
                 swing_high = recent.loc[swing_high_idx, "high"]
                 swing_low  = recent.loc[swing_low_idx,  "low"]
 
-                # Pastikan swing high sebelum swing low
                 if swing_high_idx < swing_low_idx:
                     return {
                         "valid"      : True,
@@ -86,42 +80,38 @@ class FibonacciEngine:
             range_ = swing["swing_range"]
 
             if direction == "BUY":
-                # Retracement: dari high ke bawah
                 retracement = {
                     "0.0"  : end,
                     "0.236": end - range_ * 0.236,
                     "0.382": end - range_ * 0.382,
-                    "0.500": end - range_ * 0.500,  # ⭐ Penting
-                    "0.618": end - range_ * 0.618,  # ⭐ Golden Ratio
+                    "0.500": end - range_ * 0.500,
+                    "0.618": end - range_ * 0.618,
                     "0.786": end - range_ * 0.786,
                     "1.0"  : start,
                 }
-                # Extension: target TP di atas swing high
                 extension = {
-                    "1.272": end + range_ * 0.272,  # TP1
-                    "1.618": end + range_ * 0.618,  # TP2 ⭐
+                    "1.272": end + range_ * 0.272,
+                    "1.618": end + range_ * 0.618,
                     "2.000": end + range_ * 1.000,
-                    "2.618": end + range_ * 1.618,  # TP3 ⭐
+                    "2.618": end + range_ * 1.618,
                     "3.618": end + range_ * 2.618,
                 }
 
             else:  # SELL
-                # Retracement: dari low ke atas
                 retracement = {
                     "0.0"  : end,
                     "0.236": end + range_ * 0.236,
                     "0.382": end + range_ * 0.382,
-                    "0.500": end + range_ * 0.500,  # ⭐
-                    "0.618": end + range_ * 0.618,  # ⭐ Golden Ratio
+                    "0.500": end + range_ * 0.500,
+                    "0.618": end + range_ * 0.618,
                     "0.786": end + range_ * 0.786,
                     "1.0"  : start,
                 }
-                # Extension: target TP di bawah swing low
                 extension = {
-                    "1.272": end - range_ * 0.272,  # TP1
-                    "1.618": end - range_ * 0.618,  # TP2 ⭐
+                    "1.272": end - range_ * 0.272,
+                    "1.618": end - range_ * 0.618,
                     "2.000": end - range_ * 1.000,
-                    "2.618": end - range_ * 1.618,  # TP3 ⭐
+                    "2.618": end - range_ * 1.618,
                     "3.618": end - range_ * 2.618,
                 }
 
@@ -133,8 +123,6 @@ class FibonacciEngine:
                 "range"      : range_,
                 "retracement": retracement,
                 "extension"  : extension,
-
-                # Level penting langsung
                 "fib_50" : retracement["0.500"],
                 "fib_618": retracement["0.618"],
                 "fib_786": retracement["0.786"],
@@ -154,23 +142,13 @@ class FibonacciEngine:
                                fib_levels: dict,
                                tolerance_pct: float = 1.0
                                ) -> dict:
-        """
-        Cek level fibonacci terdekat dengan harga.
-
-        FIX: Tolerance dinaikkan dari 0.3% → 1.0%
-        Alasan: Dengan 0.3%, BTC di $94k hanya punya
-        window $282 — hampir tidak pernah terpenuhi saat
-        scan tiap 60 detik. Dengan 1.0% window jadi ~$940,
-        realistis untuk timeframe 15m.
-        """
+        """Cek level fibonacci terdekat dengan harga"""
         try:
             retracement = fib_levels.get("retracement", {})
+            tolerance   = price * (tolerance_pct / 100)
 
-            # ── FIX: tolerance 0.3% → 1.0% ──────────────────────────────────
-            tolerance = price * (tolerance_pct / 100)
-
-            best_match  = None
-            best_dist   = float("inf")
+            best_match = None
+            best_dist  = float("inf")
 
             for level_name, level_price in retracement.items():
                 dist = abs(price - level_price)
@@ -181,7 +159,6 @@ class FibonacciEngine:
             if best_match:
                 level_price = retracement[best_match]
 
-                # Tentukan kekuatan level
                 if best_match in ["0.618", "0.500"]:
                     strength = "STRONG"
                     score    = 2
@@ -229,7 +206,17 @@ class FibonacciEngine:
         """
         Hitung SL & TP berdasarkan:
         - Fibonacci extension untuk TP
-        - ATR + Liquidity untuk SL
+        - ATR dynamic untuk SL
+
+        UPDATE: ATR multiplier naik dari 1.5 → 2.0
+        Alasan: SL 1.5× ATR terlalu ketat untuk crypto,
+        sering kena noise sebelum harga balik. Dengan 2.0×,
+        SL lebih realistis (~2-3% untuk BTC/ETH di 15m/1h).
+
+        Guideline per timeframe:
+          15M → SL ≈ 2.0× ATR  (~1.5–2.5%)
+          1H  → SL ≈ 2.0× ATR  (~2–3%)
+          4H  → SL ≈ 2.0× ATR  (~3–5%)
         """
         try:
             if not fib_levels.get("valid"):
@@ -239,8 +226,8 @@ class FibonacciEngine:
             tp2 = fib_levels["tp2"]
             tp3 = fib_levels["tp3"]
 
-            # SL berdasarkan ATR + area liquidity
-            atr_multiplier = 1.5
+            # ── UPDATE: multiplier 1.5 → 2.0 ─────────────────────────────────
+            atr_multiplier = 2.0
 
             if direction == "BUY":
                 sl_atr = entry - (atr * atr_multiplier)
@@ -276,17 +263,26 @@ class FibonacciEngine:
                     tp2 = entry - (risk * cfg.MIN_RR)
                     rr2 = cfg.MIN_RR
 
+            sl_pct = abs(entry - sl) / entry * 100
+
+            logger.debug(
+                f"📐 SL calc: entry={entry:.2f} sl={sl:.2f} "
+                f"({sl_pct:.2f}%) | ATR={atr:.2f} mult={atr_multiplier}"
+            )
+
             return {
-                "entry"  : entry,
-                "sl"     : round(sl,  4),
-                "tp1"    : round(tp1, 4),
-                "tp2"    : round(tp2, 4),
-                "tp3"    : round(tp3, 4),
-                "risk"   : round(risk, 4),
-                "rr1"    : round(rr1, 2),
-                "rr2"    : round(rr2, 2),
-                "rr3"    : round(rr3, 2),
-                "sl_type": "Liquidity + ATR",
+                "entry"      : entry,
+                "sl"         : round(sl,  4),
+                "tp1"        : round(tp1, 4),
+                "tp2"        : round(tp2, 4),
+                "tp3"        : round(tp3, 4),
+                "risk"       : round(risk, 4),
+                "sl_pct"     : round(sl_pct, 2),
+                "rr1"        : round(rr1, 2),
+                "rr2"        : round(rr2, 2),
+                "rr3"        : round(rr3, 2),
+                "sl_type"    : "Dynamic ATR 2.0x + Liquidity",
+                "atr_mult"   : atr_multiplier,
             }
 
         except Exception as e:
@@ -344,7 +340,6 @@ class FibonacciEngine:
                     tp_sl["active_rr"] = tp_sl["rr1"]
                     tp_sl["momentum"]  = "WEAK"
 
-            # Pastikan minimal RR terpenuhi
             if tp_sl.get("active_rr", 0) < cfg.MIN_RR:
                 tp_sl["active_rr"] = cfg.MIN_RR
                 if direction == "BUY":
@@ -372,7 +367,6 @@ class FibonacciEngine:
                 liquidity_level: float = None) -> dict:
         """Full fibonacci analysis"""
         try:
-            # Hitung levels
             fib_levels = self.calculate_levels(df, direction)
 
             if not fib_levels.get("valid"):
@@ -382,22 +376,18 @@ class FibonacciEngine:
                     "fib_score": 0,
                 }
 
-            # Cek apakah harga di level fib penting
             nearest = self.get_nearest_fib_level(
                 current_price, fib_levels
-                # tolerance_pct default sekarang 1.0%
             )
 
-            # Hitung TP & SL
             tp_sl = self.calculate_tp_sl(
-                entry           =current_price,
-                direction       =direction,
-                atr             =atr,
-                fib_levels      =fib_levels,
-                liquidity_level =liquidity_level,
+                entry           = current_price,
+                direction       = direction,
+                atr             = atr,
+                fib_levels      = fib_levels,
+                liquidity_level = liquidity_level,
             )
 
-            # Dynamic RR adjustment
             if tp_sl:
                 tp_sl = self.adjust_rr_to_market(
                     df, tp_sl, direction

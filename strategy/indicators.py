@@ -4,8 +4,8 @@
 
 import pandas as pd
 import numpy as np
-from ta.trend import EMAIndicator, MACD, ADXIndicator
-from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 from config import cfg
 from logger import logger
@@ -50,58 +50,74 @@ class Indicators:
             logger.error(f"❌ EMA error: {e}")
             return pd.Series(dtype=float)
 
-    @staticmethod
-    def macd(df: pd.DataFrame) -> dict:
-        """MACD Indicator"""
-        try:
-            macd_ind = MACD(
-                close      =df["close"],
-                window_fast=cfg.MACD_FAST,
-                window_slow=cfg.MACD_SLOW,
-                window_sign=cfg.MACD_SIGNAL,
-            )
-            return {
-                "macd"     : macd_ind.macd(),
-                "signal"   : macd_ind.macd_signal(),
-                "histogram": macd_ind.macd_diff(),
-            }
-        except Exception as e:
-            logger.error(f"❌ MACD error: {e}")
-            return {}
-
-    @staticmethod
-    def adx(df: pd.DataFrame) -> dict:
-        """ADX - Trend Strength"""
-        try:
-            adx_ind = ADXIndicator(
-                high  =df["high"],
-                low   =df["low"],
-                close =df["close"],
-                window=cfg.ADX_PERIOD,
-            )
-            return {
-                "adx"   : adx_ind.adx(),
-                "di_pos": adx_ind.adx_pos(),
-                "di_neg": adx_ind.adx_neg(),
-            }
-        except Exception as e:
-            logger.error(f"❌ ADX error: {e}")
-            return {}
-
     # ─── MOMENTUM INDICATORS ────────────────
 
     @staticmethod
-    def rsi(df: pd.DataFrame) -> pd.Series:
-        """RSI Indicator"""
+    def stochastic(df: pd.DataFrame,
+                   k_period: int = 5,
+                   d_smooth: int = 3,
+                   k_smooth: int = 3) -> dict:
+        """
+        Stochastic Oscillator
+        Default: %K panjang=5, penghalusan %K=3, penghalusan %D=3
+        Sesuai request: Stoch(5,3,3)
+        """
         try:
-            rsi_ind = RSIIndicator(
-                close =df["close"],
-                window=cfg.RSI_PERIOD,
+            stoch = StochasticOscillator(
+                high   = df["high"],
+                low    = df["low"],
+                close  = df["close"],
+                window = k_period,
+                smooth_window = d_smooth,
             )
-            return rsi_ind.rsi()
+            k_line = stoch.stoch()
+            d_line = stoch.stoch_signal()
+
+            last_k    = float(k_line.iloc[-1])
+            last_d    = float(d_line.iloc[-1])
+            prev_k    = float(k_line.iloc[-2])
+            prev_d    = float(d_line.iloc[-2])
+
+            # Crossover detection
+            cross_up   = (last_k > last_d) and (prev_k <= prev_d)
+            cross_down = (last_k < last_d) and (prev_k >= prev_d)
+
+            # Zone detection
+            oversold   = last_k < 20 and last_d < 20
+            overbought = last_k > 80 and last_d > 80
+
+            # Bullish: crossover di oversold zone
+            # Bearish: crossover di overbought zone
+            bullish_signal = cross_up   and oversold
+            bearish_signal = cross_down and overbought
+
+            # Soft signal: crossover meski belum extreme zone
+            soft_bullish = cross_up   and last_k < 50
+            soft_bearish = cross_down and last_k > 50
+
+            return {
+                "k"              : last_k,
+                "d"              : last_d,
+                "k_line"         : k_line,
+                "d_line"         : d_line,
+                "cross_up"       : cross_up,
+                "cross_down"     : cross_down,
+                "oversold"       : oversold,
+                "overbought"     : overbought,
+                "bullish_signal" : bullish_signal,
+                "bearish_signal" : bearish_signal,
+                "soft_bullish"   : soft_bullish,
+                "soft_bearish"   : soft_bearish,
+            }
         except Exception as e:
-            logger.error(f"❌ RSI error: {e}")
-            return pd.Series(dtype=float)
+            logger.error(f"❌ Stochastic error: {e}")
+            return {
+                "k": 50, "d": 50,
+                "cross_up": False, "cross_down": False,
+                "oversold": False, "overbought": False,
+                "bullish_signal": False, "bearish_signal": False,
+                "soft_bullish": False, "soft_bearish": False,
+            }
 
     # ─── VOLATILITY INDICATORS ──────────────
 
@@ -172,7 +188,6 @@ class Indicators:
     def detect_candle_pattern(df: pd.DataFrame) -> dict:
         """Deteksi pola candlestick"""
         try:
-            # Butuh minimal 3 candle
             if len(df) < 3:
                 return {
                     "patterns" : [],
@@ -181,7 +196,6 @@ class Indicators:
                     "body_pct" : 0,
                 }
 
-            # Ambil nilai sebagai float
             last  = df.iloc[-1]
             prev  = df.iloc[-2]
             prev2 = df.iloc[-3]
@@ -197,10 +211,9 @@ class Indicators:
             prev2_open  = float(prev2["open"])
             prev2_close = float(prev2["close"])
 
-            # Body & wick calculations
-            body       = abs(close - open_)
+            body         = abs(close - open_)
             candle_range = high - low
-            body_pct   = (
+            body_pct     = (
                 body / candle_range
                 if candle_range > 0 else 0
             )
@@ -212,39 +225,33 @@ class Indicators:
 
             patterns = []
 
-            # ── Bullish Engulfing ────────────
             if (close > open_ and
                     prev_close < prev_open and
                     close > prev_open and
                     open_ < prev_close):
                 patterns.append("Bullish Engulfing")
 
-            # ── Bearish Engulfing ────────────
             if (close < open_ and
                     prev_close > prev_open and
                     close < prev_open and
                     open_ > prev_close):
                 patterns.append("Bearish Engulfing")
 
-            # ── Bullish Pin Bar (Hammer) ─────
             if (body > 0 and
                     lower_wick > body * 2 and
                     upper_wick < body * 0.5 and
                     body_pct < 0.4):
                 patterns.append("Bullish Pin Bar")
 
-            # ── Bearish Pin Bar (Shooting Star)
             if (body > 0 and
                     upper_wick > body * 2 and
                     lower_wick < body * 0.5 and
                     body_pct < 0.4):
                 patterns.append("Bearish Pin Bar")
 
-            # ── Doji ─────────────────────────
             if body_pct < 0.1:
                 patterns.append("Doji")
 
-            # ── Morning Star ─────────────────
             if (prev2_body > 0 and
                     prev2_close < prev2_open and
                     prev_body < prev2_body * 0.3 and
@@ -252,7 +259,6 @@ class Indicators:
                     close > (prev2_open + prev2_close) / 2):
                 patterns.append("Morning Star")
 
-            # ── Evening Star ─────────────────
             if (prev2_body > 0 and
                     prev2_close > prev2_open and
                     prev_body < prev2_body * 0.3 and
@@ -260,7 +266,6 @@ class Indicators:
                     close < (prev2_open + prev2_close) / 2):
                 patterns.append("Evening Star")
 
-            # ── Tentukan arah ────────────────
             bullish_patterns = [
                 "Bullish Engulfing",
                 "Bullish Pin Bar",
@@ -302,27 +307,15 @@ class Indicators:
             if df.empty or len(df) < 50:
                 return {}
 
-            # ── EMA Fibonacci ────────────────
+            # ── EMA ──────────────────────────
             ema_fast_series = self.ema(df, cfg.EMA_FAST)
             ema_slow_series = self.ema(df, cfg.EMA_SLOW)
 
             if ema_fast_series.empty or ema_slow_series.empty:
                 return {}
 
-            # ── MACD ─────────────────────────
-            macd_data = self.macd(df)
-            if not macd_data:
-                return {}
-
-            # ── RSI ──────────────────────────
-            rsi_series = self.rsi(df)
-            if rsi_series.empty:
-                return {}
-
-            # ── ADX ──────────────────────────
-            adx_data = self.adx(df)
-            if not adx_data:
-                return {}
+            # ── Stochastic (5,3,3) ───────────
+            stoch_data = self.stochastic(df)
 
             # ── Bollinger Bands ──────────────
             bb_data = self.bollinger_bands(df)
@@ -341,19 +334,14 @@ class Indicators:
             candle = self.detect_candle_pattern(df)
 
             # ── Nilai terkini ─────────────────
-            last_close     = float(df["close"].iloc[-1])
-            last_high      = float(df["high"].iloc[-1])
-            last_low       = float(df["low"].iloc[-1])
-            last_ema_fast  = float(ema_fast_series.iloc[-1])
-            last_ema_slow  = float(ema_slow_series.iloc[-1])
-            last_rsi       = float(rsi_series.iloc[-1])
-            last_adx       = float(adx_data["adx"].iloc[-1])
-            last_macd_hist = float(
-                macd_data["histogram"].iloc[-1]
-            )
-            last_atr       = float(atr_series.iloc[-1])
+            last_close    = float(df["close"].iloc[-1])
+            last_high     = float(df["high"].iloc[-1])
+            last_low      = float(df["low"].iloc[-1])
+            last_ema_fast = float(ema_fast_series.iloc[-1])
+            last_ema_slow = float(ema_slow_series.iloc[-1])
+            last_atr      = float(atr_series.iloc[-1])
 
-            # ── EMA crossover detection ──────
+            # ── EMA crossover ────────────────
             ema_bullish    = last_ema_fast > last_ema_slow
             prev_ema_fast  = float(ema_fast_series.iloc[-2])
             prev_ema_slow  = float(ema_slow_series.iloc[-2])
@@ -381,24 +369,17 @@ class Indicators:
                 "ema_cross_up"    : ema_cross_up,
                 "ema_cross_down"  : ema_cross_down,
 
-                # ── RSI
-                "rsi"             : last_rsi,
-                "rsi_overbought"  : last_rsi > cfg.RSI_OVERBOUGHT,
-                "rsi_oversold"    : last_rsi < cfg.RSI_OVERSOLD,
-                "rsi_neutral"     : (
-                    cfg.RSI_NEUTRAL_LOW
-                    <= last_rsi <=
-                    cfg.RSI_NEUTRAL_HI
-                ),
-
-                # ── MACD
-                "macd_histogram"  : last_macd_hist,
-                "macd_bullish"    : last_macd_hist > 0,
-                "macd_bearish"    : last_macd_hist < 0,
-
-                # ── ADX
-                "adx"             : last_adx,
-                "trend_strong"    : last_adx > cfg.ADX_THRESHOLD,
+                # ── Stochastic (5,3,3)
+                "stoch_k"         : stoch_data["k"],
+                "stoch_d"         : stoch_data["d"],
+                "stoch_cross_up"  : stoch_data["cross_up"],
+                "stoch_cross_down": stoch_data["cross_down"],
+                "stoch_oversold"  : stoch_data["oversold"],
+                "stoch_overbought": stoch_data["overbought"],
+                "stoch_bullish"   : stoch_data["bullish_signal"],
+                "stoch_bearish"   : stoch_data["bearish_signal"],
+                "stoch_soft_bull" : stoch_data["soft_bullish"],
+                "stoch_soft_bear" : stoch_data["soft_bearish"],
 
                 # ── ATR
                 "atr"             : last_atr,
@@ -415,9 +396,7 @@ class Indicators:
 
                 # ── Volume
                 "volume_ratio"    : vol_data.get("ratio", 0),
-                "volume_above_avg": vol_data.get(
-                    "above_avg", False
-                ),
+                "volume_above_avg": vol_data.get("above_avg", False),
 
                 # ── Candle Pattern
                 "candle_pattern"  : candle.get("patterns", []),

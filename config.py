@@ -4,9 +4,20 @@
 #
 # PHASE GUIDE (ubah di Railway Variables):
 #
-#   DEMO Phase 1  → MIN_CONFLUENCE_SCORE=7  MIN_RR=2.0  ADX_THRESHOLD=20
-#   DEMO Phase 2  → MIN_CONFLUENCE_SCORE=9  MIN_RR=2.5  ADX_THRESHOLD=22
-#   LIVE          → MIN_CONFLUENCE_SCORE=11 MIN_RR=3.0  ADX_THRESHOLD=25
+#   DEMO Phase 1  → MIN_CONFLUENCE_SCORE=10  MIN_RR=2.0
+#   DEMO Phase 2  → MIN_CONFLUENCE_SCORE=13  MIN_RR=2.5
+#   LIVE          → MIN_CONFLUENCE_SCORE=16  MIN_RR=3.0
+#
+#   Catatan: max score sekarang 20 poin (bukan 16)
+#   setelah Stochastic + Breakout/Pullback ditambahkan.
+#
+#   Breakdown 20 poin:
+#   EMA(1) + Stoch(2) + Vol(1) + Candle(1)         = 5
+#   Breakout(2) + Pullback(1)                       = 3
+#   BOS(2) + OB(2) + FVG(1) + Liq(1) + PD(1)       = 7
+#   Fib618(2) + Fib50(1)                            = 3
+#   Killzone(1) + News(1)                           = 2
+#   TOTAL                                           = 20
 #
 # ============================================
 
@@ -14,6 +25,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 class Config:
 
@@ -93,11 +105,12 @@ class Config:
     TF_ENTRY = os.getenv("TF_ENTRY", "15m")
 
     # ─── CONFLUENCE ─────────────────────────
-    # Demo Phase 1 : 7  (collect data, bot harus bisa entry)
-    # Demo Phase 2 : 9  (setelah konsisten)
-    # Live         : 11 (full institutional)
+    # Max score sekarang 20 (naik dari 16)
+    # Demo Phase 1 : 10  (bot bisa entry, collect data)
+    # Demo Phase 2 : 13  (setelah konsisten profit)
+    # Live         : 16  (full institutional)
     MIN_CONFLUENCE_SCORE = int(
-        os.getenv("MIN_CONFLUENCE_SCORE", 7)
+        os.getenv("MIN_CONFLUENCE_SCORE", 10)
     )
 
     # ─── FIBONACCI ──────────────────────────
@@ -115,14 +128,9 @@ class Config:
     }
 
     # ─── RISK/REWARD ────────────────────────
-    # FIX: Diturunkan dari 3.0 → 2.0 untuk demo
-    # Demo Phase 1 : MIN_RR=2.0 (realistis, BTC range normal)
+    # Demo Phase 1 : MIN_RR=2.0
     # Demo Phase 2 : MIN_RR=2.5
     # Live         : MIN_RR=3.0
-    #
-    # Kenapa 3.0 bermasalah di demo:
-    # ATR 15m BTC ~$200, entry ke TP2 (1.618 ext) sering < RR 1:3
-    # Bot paksa TP2 manual tapi tetap skip karena check di fibonacci.py
     MIN_RR    = float(os.getenv("MIN_RR", 2.0))
     TP1_RATIO = 1.272
     TP2_RATIO = 1.618
@@ -140,52 +148,57 @@ class Config:
         },
     }
 
-    # ─── INDICATORS ─────────────────────────
-    EMA_FAST       = int(os.getenv("EMA_FAST", 13))
-    EMA_SLOW       = int(os.getenv("EMA_SLOW", 21))
-    RSI_PERIOD     = int(os.getenv("RSI_PERIOD", 14))
-    RSI_OVERBOUGHT = int(os.getenv("RSI_OVERBOUGHT", 70))
-    RSI_OVERSOLD   = int(os.getenv("RSI_OVERSOLD", 30))
+    # ─── EMA ────────────────────────────────
+    EMA_FAST = int(os.getenv("EMA_FAST", 13))
+    EMA_SLOW = int(os.getenv("EMA_SLOW", 21))
 
-    # FIX: Dilebarkan dari 40-60 → 35-65 untuk demo
-    # Range 40-60 terlalu sempit — RSI 61 langsung gagal
-    # padahal itu kondisi normal uptrend ringan.
-    # Demo Phase 1 : 35-65
-    # Demo Phase 2 : 38-62
-    # Live         : 40-60 (kembali ketat)
-    RSI_NEUTRAL_LOW = int(os.getenv("RSI_NEUTRAL_LOW", 35))
-    RSI_NEUTRAL_HI  = int(os.getenv("RSI_NEUTRAL_HI",  65))
+    # ─── STOCHASTIC (5,3,3) ─────────────────
+    # Menggantikan RSI, MACD, ADX yang dihapus karena lagging
+    # %K period=5 → responsif untuk 15m timeframe
+    # smooth %K=3, smooth %D=3 → standard institutional setting
+    STOCH_K_PERIOD = int(os.getenv("STOCH_K_PERIOD", 5))
+    STOCH_D_SMOOTH = int(os.getenv("STOCH_D_SMOOTH", 3))
+    STOCH_K_SMOOTH = int(os.getenv("STOCH_K_SMOOTH", 3))
+    # Zone threshold
+    STOCH_OVERSOLD   = int(os.getenv("STOCH_OVERSOLD",   20))
+    STOCH_OVERBOUGHT = int(os.getenv("STOCH_OVERBOUGHT", 80))
 
-    MACD_FAST   = int(os.getenv("MACD_FAST",   12))
-    MACD_SLOW   = int(os.getenv("MACD_SLOW",   26))
-    MACD_SIGNAL = int(os.getenv("MACD_SIGNAL",  9))
-    BB_PERIOD   = int(os.getenv("BB_PERIOD",   20))
-    BB_STD      = int(os.getenv("BB_STD",       2))
-    ATR_PERIOD  = int(os.getenv("ATR_PERIOD",  14))
-    VOLUME_MA   = int(os.getenv("VOLUME_MA",   20))
+    # ─── BOLLINGER BANDS ────────────────────
+    BB_PERIOD = int(os.getenv("BB_PERIOD", 20))
+    BB_STD    = int(os.getenv("BB_STD",     2))
 
-    # FIX: Diturunkan dari 25 → 20 untuk demo
-    # ADX > 25 butuh trend yang sudah jalan kuat.
-    # Masalahnya: kalau ADX udah 25+ harga sering sudah
-    # jauh dari OB — dua kondisi ini jarang bersamaan.
-    # Demo Phase 1 : ADX_THRESHOLD=20
-    # Demo Phase 2 : ADX_THRESHOLD=22
-    # Live         : ADX_THRESHOLD=25
-    ADX_PERIOD    = int(os.getenv("ADX_PERIOD",    14))
-    ADX_THRESHOLD = int(os.getenv("ADX_THRESHOLD", 20))
+    # ─── ATR ────────────────────────────────
+    # Dipakai untuk SL dynamic (2.0x ATR)
+    ATR_PERIOD    = int(os.getenv("ATR_PERIOD",    14))
+    ATR_SL_MULT   = float(os.getenv("ATR_SL_MULT", 2.0))
+
+    # ─── VOLUME ─────────────────────────────
+    VOLUME_MA = int(os.getenv("VOLUME_MA", 20))
+
+    # ─── VWAP ───────────────────────────────
+    # Dipakai untuk institutional filter
+    # Harga di bawah VWAP = discount zone (ideal BUY)
+    # Harga di atas VWAP  = premium zone  (ideal SELL)
+    VWAP_ENABLED       = os.getenv("VWAP_ENABLED", "true").lower() == "true"
+    VWAP_TOLERANCE_PCT = float(os.getenv("VWAP_TOLERANCE_PCT", 0.3))
+
+    # ─── FUNDING RATE ───────────────────────
+    # Crypto-specific institutional filter
+    # Hindari BUY saat funding rate sangat positif (longs membayar)
+    # Hindari SELL saat funding rate sangat negatif (shorts membayar)
+    FUNDING_RATE_ENABLED     = os.getenv("FUNDING_RATE_ENABLED", "true").lower() == "true"
+    FUNDING_RATE_MAX_LONG    = float(os.getenv("FUNDING_RATE_MAX_LONG",   0.05))
+    FUNDING_RATE_MAX_SHORT   = float(os.getenv("FUNDING_RATE_MAX_SHORT", -0.05))
+
+    # ─── MARKET REGIME ──────────────────────
+    # Auto-adjust parameter berdasarkan kondisi market
+    REGIME_ENABLED = os.getenv("REGIME_ENABLED", "true").lower() == "true"
+    # Di regime RANGING, naikkan threshold sedikit untuk skip noise
+    REGIME_RANGING_SCORE_BOOST = int(os.getenv("REGIME_RANGING_SCORE_BOOST", 2))
 
     # ─── SMC SETTINGS ───────────────────────
-    # FIX: SMC_SWING_LOOKBACK dinaikkan 10 → 15
-    # Dengan lookback 10, di market choppy sering tidak
-    # cukup swing points untuk detect struktur 4H.
-    # 15 candle = 60 jam data di 4H — lebih representatif.
     SMC_SWING_LOOKBACK = int(os.getenv("SMC_SWING_LOOKBACK", 15))
-
-    # FIX: FVG_MIN_SIZE diturunkan 0.1% → 0.05%
-    # Di market low volatility BTC, FVG sering < 0.1%
-    # tapi tetap valid secara SMC institutional.
-    FVG_MIN_SIZE = float(os.getenv("FVG_MIN_SIZE", 0.05))
-
+    FVG_MIN_SIZE       = float(os.getenv("FVG_MIN_SIZE",    0.05))
     OB_LOOKBACK        = int(os.getenv("OB_LOOKBACK",        20))
     LIQUIDITY_LOOKBACK = int(os.getenv("LIQUIDITY_LOOKBACK", 30))
     STRUCTURE_LOOKBACK = int(os.getenv("STRUCTURE_LOOKBACK", 50))

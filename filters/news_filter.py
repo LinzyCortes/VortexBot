@@ -6,7 +6,6 @@ import requests
 from datetime import datetime, timezone, timedelta
 from logger import logger
 
-# ─── Timezone Helper ──────────────────────────────────────────────────────────
 WIB = timezone(timedelta(hours=7))
 UTC = timezone.utc
 
@@ -19,13 +18,11 @@ class NewsFilter:
         ]
         self.cache        = []
         self.cache_time   = None
-        self.cache_expiry = 3600  # 1 jam
-        self.fetch_failed = False
+        self.cache_expiry = 3600
         self.fail_count   = 0
         self.max_fails    = 3
 
     def _fetch_news(self) -> list:
-        """Fetch news dengan multiple URL fallback"""
         try:
             if (self.cache and self.cache_time and
                     (datetime.now() -
@@ -49,8 +46,7 @@ class NewsFilter:
                             self.cache_time = datetime.now()
                             self.fail_count = 0
                             logger.debug(
-                                f"📰 News fetched: "
-                                f"{len(data)} events"
+                                f"📰 News fetched: {len(data)} events"
                             )
                             return self.cache
                 except Exception:
@@ -70,7 +66,6 @@ class NewsFilter:
     def is_safe_to_trade(self,
                          minutes_before: int = 30,
                          minutes_after : int = 30) -> dict:
-        """Cek apakah aman trading (pakai UTC untuk compare news time)"""
         try:
             news_list   = self._fetch_news()
             now_utc     = datetime.now(UTC).replace(tzinfo=None)
@@ -101,10 +96,7 @@ class NewsFilter:
                 window_end   = news_time + timedelta(minutes=minutes_after)
 
                 if window_start <= now_utc <= window_end:
-                    # Hitung jam aman (window_end + buffer kecil) dalam WIB
-                    safe_at_utc = window_end
-                    safe_at_wib = safe_at_utc + timedelta(hours=7)
-
+                    safe_at_wib = window_end + timedelta(hours=7)
                     unsafe_news.append({
                         "title"      : news.get("title", ""),
                         "time"       : time_str,
@@ -134,27 +126,18 @@ class NewsFilter:
     def get_blocking_news(self,
                           minutes_before: int = 30,
                           minutes_after : int = 30) -> dict:
-        """
-        Return detail news yang sedang blokir trading.
-        Dipakai oleh main.py untuk kirim notif Telegram.
-
-        Returns:
-            {
-                "is_blocking": bool,
-                "news_list"  : [{"title", "country", "impact", "safe_at_wib"}],
-                "safe_resume": "17:30 WIB",   # jam paling akhir dari semua news
-            }
-        """
         try:
             status = self.is_safe_to_trade(minutes_before, minutes_after)
             if status["is_safe"]:
-                return {"is_blocking": False, "news_list": [], "safe_resume": None}
+                return {
+                    "is_blocking": False,
+                    "news_list"  : [],
+                    "safe_resume": None,
+                }
 
-            unsafe = status["unsafe_news"]
-
-            # Cari jam safe paling akhir dari semua news yang blocking
-            # Format: "HH:MM WIB" → parse jam & menit untuk sort
+            unsafe      = status["unsafe_news"]
             latest_safe = None
+
             for n in unsafe:
                 safe_str = n.get("safe_at_wib", "")
                 if safe_str:
@@ -165,7 +148,10 @@ class NewsFilter:
                     except Exception:
                         pass
 
-            safe_resume = latest_safe.strftime("%H:%M WIB") if latest_safe else "N/A"
+            safe_resume = (
+                latest_safe.strftime("%H:%M WIB")
+                if latest_safe else "N/A"
+            )
 
             return {
                 "is_blocking": True,
@@ -175,11 +161,13 @@ class NewsFilter:
 
         except Exception as e:
             logger.error(f"❌ get_blocking_news error: {e}")
-            return {"is_blocking": False, "news_list": [], "safe_resume": None}
+            return {
+                "is_blocking": False,
+                "news_list"  : [],
+                "safe_resume": None,
+            }
 
-    def get_upcoming_news(self,
-                          hours_ahead: int = 12) -> list:
-        """Ambil news upcoming (UTC untuk komparasi, tampil WIB)"""
+    def get_upcoming_news(self, hours_ahead: int = 12) -> list:
         try:
             news_list = self._fetch_news()
             now_utc   = datetime.now(UTC).replace(tzinfo=None)
@@ -230,34 +218,35 @@ class SessionFilter:
     """
     Semua jam dalam WIB (Asia/Jakarta, UTC+7).
 
-    ┌─────────────────────────────────────────────────────┐
-    │  Jadwal Killzone (WIB):                             │
-    │  London Killzone   : 15:00 – 17:30 WIB             │
-    │  New York Killzone : 20:30 – 23:00 WIB             │
-    │  Pre-London buffer : 14:45 WIB (15 mnt sebelum)    │
-    │  Pre-NY buffer     : 20:15 WIB (15 mnt sebelum)    │
-    └─────────────────────────────────────────────────────┘
+    Killzone schedule:
+      London   : 15:00 – 17:30 WIB
+      New York : 20:30 – 23:00 WIB
+
+    FIX v1.1: Killzone transition state sekarang persistent
+    ke DB supaya tidak reset setiap Railway redeploy.
+    Sebelumnya pakai instance variable (_notified_start set)
+    yang hilang setiap restart → NY killzone tidak pernah
+    kirim notif karena state selalu fresh.
     """
 
     def __init__(self):
         self.sessions = {
             "london": {
-                "open"    : (15,  0),   # 15:00 WIB
-                "close"   : (17, 30),   # 17:30 WIB
-                "pre_open": (14, 45),   # Pre-London buffer
+                "open"    : (15,  0),
+                "close"   : (17, 30),
+                "pre_open": (14, 45),
                 "name"    : "London Killzone",
                 "pre_name": "Pre-London",
             },
             "new_york": {
-                "open"    : (20, 30),   # 20:30 WIB
-                "close"   : (23,  0),   # 23:00 WIB
-                "pre_open": (20, 15),   # Pre-NY buffer
+                "open"    : (20, 30),
+                "close"   : (23,  0),
+                "pre_open": (20, 15),
                 "name"    : "New York Killzone",
                 "pre_name": "Pre-NY",
             },
         }
 
-        # Waktu yang dihindari (weekday WIB: 0=Senin, 4=Jumat)
         self.avoid_times = [
             {
                 "day"   : 0,
@@ -273,19 +262,72 @@ class SessionFilter:
             },
         ]
 
-        # ── State tracking untuk killzone notifications ───────────────────────
-        # Menyimpan session key yang sudah dikirim notif "STARTED"
-        # supaya notif tidak dikirim ulang tiap scan (tiap 60 detik)
-        self._notified_start : set  = set()   # {"london", "new_york"}
-        self._notified_end   : set  = set()   # {"london", "new_york"}
-        self._last_in_kz_key : str  = None    # session key terakhir yang aktif
+        # ── DB import lazy supaya tidak circular ─────────────────────────────
+        # State disimpan ke DB bukan instance variable supaya
+        # persistent setelah Railway redeploy / restart.
+        self._db = None
+
+    def _get_db(self):
+        """Lazy import DB untuk hindari circular import"""
+        if self._db is None:
+            try:
+                from database import db
+                self._db = db
+            except Exception:
+                self._db = None
+        return self._db
+
+    # ─── DB STATE HELPERS ───────────────────
+
+    def _get_kz_state(self) -> dict:
+        """
+        Ambil killzone notif state dari DB.
+        Format: {
+            "notified_start": ["london", "new_york"],
+            "notified_end"  : ["london"],
+            "last_active"   : "london",
+            "date"          : "2026-05-13",   ← reset tiap hari
+        }
+        """
+        db = self._get_db()
+        if not db:
+            return {
+                "notified_start": [],
+                "notified_end"  : [],
+                "last_active"   : None,
+                "date"          : "",
+            }
+
+        today = datetime.now(WIB).strftime("%Y-%m-%d")
+        state = db.get_state("kz_notif_state")
+
+        # Reset state setiap hari baru supaya notif bisa
+        # dikirim lagi keesokan harinya
+        if not state or state.get("date") != today:
+            fresh = {
+                "notified_start": [],
+                "notified_end"  : [],
+                "last_active"   : None,
+                "date"          : today,
+            }
+            db.set_state("kz_notif_state", fresh)
+            return fresh
+
+        return state
+
+    def _save_kz_state(self, state: dict):
+        """Simpan killzone notif state ke DB"""
+        db = self._get_db()
+        if db:
+            db.set_state("kz_notif_state", state)
+
+    # ─── KILLZONE CHECK ─────────────────────
 
     def _now_wib(self):
-        """Waktu sekarang dalam WIB (timezone-aware)"""
         now_wib  = datetime.now(WIB)
         hour_wib = now_wib.hour
         minute   = now_wib.minute
-        weekday  = now_wib.weekday()  # 0=Senin … 6=Minggu
+        weekday  = now_wib.weekday()
         return now_wib, hour_wib, minute, weekday
 
     def is_killzone(self) -> dict:
@@ -298,7 +340,6 @@ class SessionFilter:
             close_min = session["close"][0] * 60 + session["close"][1]
             pre_min   = session["pre_open"][0] * 60 + session["pre_open"][1]
 
-            # Dalam killzone aktif
             if open_min <= now_min <= close_min:
                 return {
                     "in_killzone"   : True,
@@ -308,7 +349,6 @@ class SessionFilter:
                     "is_pre_session": False,
                 }
 
-            # Dalam pre-session buffer
             if pre_min <= now_min < open_min:
                 return {
                     "in_killzone"    : False,
@@ -331,35 +371,48 @@ class SessionFilter:
             "next_session"  : next_s,
         }
 
+    # ─── KILLZONE TRANSITION ────────────────
+
     def check_killzone_transition(self) -> dict:
         """
         Cek apakah ada transisi killzone yang perlu dinotifikasi.
-        Dipanggil dari main loop tiap scan.
 
-        Returns dict berisi:
-            {
-                "event"      : "started" | "ended" | None,
-                "session_key": "london" | "new_york",
-                "session"    : "London Killzone" | "New York Killzone",
-                "wib_time"   : "15:00 WIB",
-                "minutes_left": 150,   # hanya jika event=started
-            }
+        FIX v1.1: State sekarang persistent ke DB.
+        Sebelumnya: instance variable → reset setiap Railway
+        restart → NY killzone tidak pernah notif karena
+        kondisi 'key not in _notified_start' selalu True
+        tapi check di main loop tidak trigger Telegram.
+
+        Sekarang: state disimpan ke DB per-hari, auto-reset
+        tiap hari baru supaya notif bisa jalan lagi esoknya.
         """
         try:
-            kz = self.is_killzone()
-            now_wib_dt, hour_wib, minute, _ = self._now_wib()
-            wib_time = f"{hour_wib:02d}:{minute:02d} WIB"
+            kz        = self.is_killzone()
+            _, hour_wib, minute, _ = self._now_wib()
+            wib_time  = f"{hour_wib:02d}:{minute:02d} WIB"
+
+            # Ambil state dari DB
+            state           = self._get_kz_state()
+            notified_start  = set(state.get("notified_start", []))
+            notified_end    = set(state.get("notified_end",   []))
+            last_active     = state.get("last_active")
 
             if kz["in_killzone"]:
                 key     = kz["session_key"]
                 session = kz["session"]
 
-                # Reset end-notif jika session baru mulai
-                if key not in self._notified_start:
-                    self._notified_start.add(key)
-                    self._last_in_kz_key = key
-                    # Kalau session ini pernah di-notif end sebelumnya, reset
-                    self._notified_end.discard(key)
+                if key not in notified_start:
+                    # Pertama kali masuk killzone ini hari ini → kirim notif
+                    notified_start.add(key)
+                    notified_end.discard(key)
+                    state["notified_start"] = list(notified_start)
+                    state["notified_end"]   = list(notified_end)
+                    state["last_active"]    = key
+                    self._save_kz_state(state)
+
+                    logger.info(
+                        f"🔔 Killzone STARTED: {session} | {wib_time}"
+                    )
                     return {
                         "event"       : "started",
                         "session_key" : key,
@@ -368,29 +421,37 @@ class SessionFilter:
                         "minutes_left": kz.get("minutes_left", 0),
                     }
 
-            else:
-                # Kita baru saja keluar dari killzone?
-                # Cek apakah ada session yang tadi aktif tapi sekarang tidak
-                last_key = self._last_in_kz_key
-                if (last_key and
-                        last_key in self._notified_start and
-                        last_key not in self._notified_end):
+                # Update last_active kalau belum
+                if state.get("last_active") != key:
+                    state["last_active"] = key
+                    self._save_kz_state(state)
 
-                    # Pastikan kita memang sudah melewati close time
-                    session_cfg  = self.sessions.get(last_key, {})
+            else:
+                # Cek apakah baru keluar dari killzone
+                if (last_active and
+                        last_active in notified_start and
+                        last_active not in notified_end):
+
+                    session_cfg      = self.sessions.get(last_active, {})
                     close_h, close_m = session_cfg.get("close", (0, 0))
-                    now_min      = hour_wib * 60 + minute
-                    close_min    = close_h * 60 + close_m
+                    now_min          = hour_wib * 60 + minute
+                    close_min        = close_h  * 60 + close_m
 
                     if now_min > close_min:
-                        self._notified_end.add(last_key)
-                        self._notified_start.discard(last_key)
-                        self._last_in_kz_key = None
+                        notified_end.add(last_active)
+                        notified_start.discard(last_active)
+                        state["notified_start"] = list(notified_start)
+                        state["notified_end"]   = list(notified_end)
+                        state["last_active"]    = None
+                        self._save_kz_state(state)
 
-                        session_name = session_cfg.get("name", last_key)
+                        session_name = session_cfg.get("name", last_active)
+                        logger.info(
+                            f"🔔 Killzone ENDED: {session_name} | {wib_time}"
+                        )
                         return {
                             "event"      : "ended",
-                            "session_key": last_key,
+                            "session_key": last_active,
                             "session"    : session_name,
                             "wib_time"   : wib_time,
                         }
@@ -401,8 +462,9 @@ class SessionFilter:
             logger.error(f"❌ check_killzone_transition error: {e}")
             return {"event": None}
 
+    # ─── HELPERS ────────────────────────────
+
     def _get_next_session(self, current_min: int) -> dict:
-        """Hitung sesi killzone berikutnya"""
         candidates = []
         for key, session in self.sessions.items():
             open_min = session["open"][0] * 60 + session["open"][1]
@@ -414,7 +476,6 @@ class SessionFilter:
         if candidates:
             return min(candidates, key=lambda x: x["minutes_away"])
 
-        # Besok London (15:00 WIB)
         london_open = (
             self.sessions["london"]["open"][0] * 60 +
             self.sessions["london"]["open"][1]
@@ -425,7 +486,6 @@ class SessionFilter:
         }
 
     def is_avoid_time(self) -> dict:
-        """Cek waktu yang dihindari"""
         _, hour_wib, minute, weekday = self._now_wib()
         now_min = hour_wib * 60 + minute
 
@@ -443,26 +503,24 @@ class SessionFilter:
         return {"should_avoid": False, "reason": None}
 
     def get_session_info(self) -> dict:
-        """Info lengkap sesi sekarang dalam WIB"""
         now_wib_dt, hour_wib, minute, _ = self._now_wib()
 
-        # Klasifikasi sesi berdasarkan jam WIB
         if 0 <= hour_wib < 7:
             active = "Asia Session (Low Volume)"
         elif 7 <= hour_wib < 14:
             active = "Pre-London (Preparation)"
         elif hour_wib == 14 and minute >= 45:
-            active = "Pre-London Buffer ⏳"      # 14:45–15:00
-        elif (hour_wib == 15) or (hour_wib == 16) or (hour_wib == 17 and minute <= 30):
-            active = "London Killzone ⚡"         # 15:00–17:30
+            active = "Pre-London Buffer ⏳"
+        elif (hour_wib == 15 or hour_wib == 16 or
+              (hour_wib == 17 and minute <= 30)):
+            active = "London Killzone ⚡"
         elif 17 <= hour_wib < 20:
             active = "London-NY Gap"
-        elif hour_wib == 20 and minute < 15:
-            active = "Pre-NY Buffer ⏳"           # 20:00–20:15
-        elif hour_wib == 20 and minute >= 15 and minute < 30:
-            active = "Pre-NY Buffer ⏳"           # 20:15–20:30
-        elif (hour_wib == 20 and minute >= 30) or (21 <= hour_wib < 23):
-            active = "New York Killzone ⚡"       # 20:30–23:00
+        elif hour_wib == 20 and minute < 30:
+            active = "Pre-NY Buffer ⏳"
+        elif ((hour_wib == 20 and minute >= 30) or
+              21 <= hour_wib < 23):
+            active = "New York Killzone ⚡"
         else:
             active = "Late NY / Pre-Asia"
 

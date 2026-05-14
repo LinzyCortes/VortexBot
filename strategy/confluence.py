@@ -1,6 +1,44 @@
 # ============================================
 # VORTEX BOT - CONFLUENCE SCORING SYSTEM
 # ============================================
+#
+# Breakdown 23 poin:
+#
+#   TEKNIKAL (5)
+#     EMA align        : 1
+#     Stoch (5,3,3)    : 2
+#     Volume           : 1
+#     Candle pattern   : 1
+#
+#   BREAKOUT & PULLBACK (3)
+#     Breakout         : 2
+#     Pullback         : 1
+#
+#   SMC (7)
+#     BOS / CHoCH      : 2
+#     Order Block      : 2
+#     FVG              : 1
+#     Liquidity swept  : 1
+#     Premium/Discount : 1
+#
+#   FIBONACCI (3)
+#     Fib 0.618        : 2
+#     Fib 0.500        : 1
+#
+#   INSTITUTIONAL (3)
+#     VWAP zone        : 2
+#     Funding rate     : 1
+#
+#   FILTER (2)
+#     Killzone         : 1
+#     News clear       : 1
+#
+#   TOTAL              : 23
+#
+# Phase guide (Railway Variables):
+#   Demo Phase 1 : MIN_CONFLUENCE_SCORE=11
+#   Demo Phase 2 : MIN_CONFLUENCE_SCORE=15
+#   Live         : MIN_CONFLUENCE_SCORE=18
 
 import pandas as pd
 from config import cfg
@@ -8,18 +46,6 @@ from logger import logger
 
 
 class ConfluenceScorer:
-    """
-    Sistem scoring 16 poin untuk validasi entry.
-    Bot hanya entry jika score >= MIN_CONFLUENCE_SCORE (11)
-
-    UPDATE:
-    - Hapus MACD (lagging, redundan dengan EMA)
-    - Hapus ADX  (lagging, redundan dengan EMA + SMC)
-    - Ganti RSI dengan Stochastic (5,3,3) — lebih responsif
-    - Tambah Breakout score (2 poin)
-    - Tambah Pullback score (1 poin)
-    - Total tetap 16 poin
-    """
 
     def __init__(self):
         self.score_definitions = {
@@ -28,22 +54,21 @@ class ConfluenceScorer:
             "stoch_ok"         : {"points": 2, "desc": "Stochastic (5,3,3) crossover di zone"},
             "volume_ok"        : {"points": 1, "desc": "Volume di atas rata-rata"},
             "candle_ok"        : {"points": 1, "desc": "Candle pattern konfirmasi"},
-
             # Breakout & Pullback
             "breakout_ok"      : {"points": 2, "desc": "Breakout valid dengan volume"},
             "pullback_ok"      : {"points": 1, "desc": "Pullback ke zona support/resistance"},
-
             # SMC
             "bos_confirmed"    : {"points": 2, "desc": "BOS/CHoCH terkonfirmasi"},
             "ob_valid"         : {"points": 2, "desc": "Order Block valid"},
             "fvg_detected"     : {"points": 1, "desc": "FVG terdeteksi"},
             "liquidity_swept"  : {"points": 1, "desc": "Liquidity sudah di-sweep"},
             "premium_discount" : {"points": 1, "desc": "Di area Premium/Discount"},
-
             # Fibonacci
             "fib_618"          : {"points": 2, "desc": "Fibonacci 0.618 confluence"},
             "fib_50"           : {"points": 1, "desc": "Fibonacci 0.500 confluence"},
-
+            # Institutional
+            "vwap_ok"          : {"points": 2, "desc": "VWAP zone sesuai direction"},
+            "funding_ok"       : {"points": 1, "desc": "Funding rate kondusif"},
             # Filter
             "killzone_ok"      : {"points": 1, "desc": "Dalam Killzone session"},
             "news_clear"       : {"points": 1, "desc": "Tidak ada high-impact news"},
@@ -51,32 +76,33 @@ class ConfluenceScorer:
 
         self.max_score = sum(
             v["points"] for v in self.score_definitions.values()
-        )
+        )  # = 23
 
     # ─── CALCULATE SCORE ────────────────────
 
     def calculate(self,
-                  direction       : str,
-                  indicators      : dict,
-                  smc_analysis    : dict,
-                  fib_analysis    : dict,
-                  session_info    : dict,
-                  news_status     : dict,
-                  breakout_info   : dict = None,
-                  pullback_info   : dict = None) -> dict:
+                  direction     : str,
+                  indicators    : dict,
+                  smc_analysis  : dict,
+                  fib_analysis  : dict,
+                  session_info  : dict,
+                  news_status   : dict,
+                  breakout_info : dict = None,
+                  pullback_info : dict = None,
+                  vwap_result   : dict = None,
+                  funding_result: dict = None) -> dict:
         """
-        Hitung confluence score berdasarkan
-        semua kondisi yang terpenuhi
+        Hitung confluence score 23 poin.
         """
         try:
             score     = 0
             breakdown = {}
             reasons   = []
 
-            if breakout_info is None:
-                breakout_info = {}
-            if pullback_info is None:
-                pullback_info = {}
+            if breakout_info  is None: breakout_info  = {}
+            if pullback_info  is None: pullback_info  = {}
+            if vwap_result    is None: vwap_result    = {}
+            if funding_result is None: funding_result = {}
 
             # ══════════════════════════════════
             # TEKNIKAL
@@ -97,14 +123,11 @@ class ConfluenceScorer:
                 breakdown["ema_aligned"] = 0
                 reasons.append("❌ EMA tidak aligned")
 
-            # 2. Stochastic (5,3,3) — 2 poin
-            #    2 poin: crossover DI zone oversold/overbought
-            #    1 poin: soft crossover (< 50 untuk buy, > 50 untuk sell)
-            #    0 poin: tidak ada sinyal
+            # 2. Stochastic (5,3,3) — maks 2 poin
             stoch_k    = indicators.get("stoch_k", 50)
             stoch_d    = indicators.get("stoch_d", 50)
-            stoch_bull = indicators.get("stoch_bullish",  False)
-            stoch_bear = indicators.get("stoch_bearish",  False)
+            stoch_bull = indicators.get("stoch_bullish",   False)
+            stoch_bear = indicators.get("stoch_bearish",   False)
             soft_bull  = indicators.get("stoch_soft_bull", False)
             soft_bear  = indicators.get("stoch_soft_bear", False)
 
@@ -123,17 +146,15 @@ class ConfluenceScorer:
                 breakdown["stoch_ok"] = pts
                 zone = "oversold" if direction == "BUY" else "overbought"
                 reasons.append(
-                    f"✅ Stoch crossover di {zone} zone "
+                    f"✅ Stoch crossover di {zone} "
                     f"(%K={stoch_k:.1f} %D={stoch_d:.1f})"
                 )
             elif stoch_soft:
-                pts = 1  # partial point untuk soft signal
-                score += pts
-                breakdown["stoch_ok"] = pts
+                score += 1
+                breakdown["stoch_ok"] = 1
                 reasons.append(
                     f"⚠️ Stoch soft signal "
-                    f"(%K={stoch_k:.1f} %D={stoch_d:.1f}) "
-                    f"— 1 poin"
+                    f"(%K={stoch_k:.1f} %D={stoch_d:.1f}) — 1 poin"
                 )
             else:
                 breakdown["stoch_ok"] = 0
@@ -154,9 +175,7 @@ class ConfluenceScorer:
                 )
             else:
                 breakdown["volume_ok"] = 0
-                reasons.append(
-                    f"❌ Volume {vol_ratio:.1f}x lemah"
-                )
+                reasons.append(f"❌ Volume {vol_ratio:.1f}x lemah")
 
             # 4. Candle Pattern (1 poin)
             candle_dir = indicators.get("candle_direction")
@@ -168,7 +187,7 @@ class ConfluenceScorer:
                 score += pts
                 breakdown["candle_ok"] = pts
                 reasons.append(
-                    f"✅ Candle pattern: {', '.join(patterns)}"
+                    f"✅ Candle: {', '.join(patterns)}"
                 )
             else:
                 breakdown["candle_ok"] = 0
@@ -178,60 +197,53 @@ class ConfluenceScorer:
             # BREAKOUT & PULLBACK
             # ══════════════════════════════════
 
-            # 5. Breakout (2 poin)
-            #    Breakout valid: harga break level key + volume tinggi
-            breakout_valid  = breakout_info.get("valid", False)
-            breakout_dir    = breakout_info.get("direction")
-            breakout_volume = breakout_info.get("volume_confirmed", False)
+            # 5. Breakout (maks 2 poin)
+            bo_valid  = breakout_info.get("valid", False)
+            bo_dir    = breakout_info.get("direction")
+            bo_volume = breakout_info.get("volume_confirmed", False)
 
-            if breakout_valid and breakout_dir == direction and breakout_volume:
+            if bo_valid and bo_dir == direction and bo_volume:
                 pts = self.score_definitions["breakout_ok"]["points"]
                 score += pts
                 breakdown["breakout_ok"] = pts
                 level = breakout_info.get("level", 0)
                 btype = breakout_info.get("type", "")
                 reasons.append(
-                    f"✅ Breakout {btype} di {level:.2f} "
-                    f"dengan konfirmasi volume"
+                    f"✅ Breakout {btype} @ {level:.2f} + volume"
                 )
-            elif breakout_valid and breakout_dir == direction:
-                pts = 1  # breakout tanpa volume = partial
-                score += pts
-                breakdown["breakout_ok"] = pts
-                reasons.append(
-                    f"⚠️ Breakout valid tapi volume lemah — 1 poin"
-                )
+            elif bo_valid and bo_dir == direction:
+                score += 1
+                breakdown["breakout_ok"] = 1
+                reasons.append("⚠️ Breakout valid tapi volume lemah — 1 poin")
             else:
                 breakdown["breakout_ok"] = 0
                 reasons.append("❌ Tidak ada breakout valid")
 
             # 6. Pullback (1 poin)
-            #    Harga sudah retrace ke area support/resistance
-            #    setelah breakout atau dari swing high/low
-            pullback_valid = pullback_info.get("valid", False)
-            pullback_dir   = pullback_info.get("direction")
-            pullback_depth = pullback_info.get("depth_pct", 0)
+            pb_valid = pullback_info.get("valid", False)
+            pb_dir   = pullback_info.get("direction")
+            pb_depth = pullback_info.get("depth_pct", 0)
 
-            if pullback_valid and pullback_dir == direction:
+            if pb_valid and pb_dir == direction:
                 pts = self.score_definitions["pullback_ok"]["points"]
                 score += pts
                 breakdown["pullback_ok"] = pts
                 zone = pullback_info.get("zone", "")
                 reasons.append(
-                    f"✅ Pullback {pullback_depth:.1f}% ke {zone}"
+                    f"✅ Pullback {pb_depth:.1f}% ke {zone}"
                 )
             else:
                 breakdown["pullback_ok"] = 0
                 reasons.append("❌ Tidak ada pullback ke zona valid")
 
             # ══════════════════════════════════
-            # SMC ANALYSIS
+            # SMC
             # ══════════════════════════════════
 
             # 7. BOS / CHoCH (2 poin)
-            bos_4h   = smc_analysis.get("bos_4h",  False)
+            bos_4h   = smc_analysis.get("bos_4h",   False)
             choch_4h = smc_analysis.get("choch_4h", False)
-            bos_1h   = smc_analysis.get("bos_1h",  False)
+            bos_1h   = smc_analysis.get("bos_1h",   False)
             choch_1h = smc_analysis.get("choch_1h", False)
             bos_ok   = bos_4h or choch_4h or bos_1h or choch_1h
 
@@ -240,9 +252,9 @@ class ConfluenceScorer:
                 score += pts
                 breakdown["bos_confirmed"] = pts
                 bos_type = (
-                    "BOS 4H" if bos_4h else
+                    "BOS 4H"   if bos_4h   else
                     "CHoCH 4H" if choch_4h else
-                    "BOS 1H" if bos_1h else "CHoCH 1H"
+                    "BOS 1H"   if bos_1h   else "CHoCH 1H"
                 )
                 reasons.append(f"✅ {bos_type} terkonfirmasi")
             else:
@@ -281,13 +293,13 @@ class ConfluenceScorer:
                 breakdown["liquidity_swept"] = pts
                 liq_type = "SSL" if direction == "BUY" else "BSL"
                 reasons.append(
-                    f"✅ {liq_type} sudah di-sweep → smart money aktif"
+                    f"✅ {liq_type} swept → smart money aktif"
                 )
             else:
                 breakdown["liquidity_swept"] = 0
                 reasons.append("❌ Liquidity belum di-sweep")
 
-            # 11. Premium / Discount Zone (1 poin)
+            # 11. Premium / Discount (1 poin)
             ideal_zone = smc_analysis.get("ideal_zone", False)
             if ideal_zone:
                 pts = self.score_definitions["premium_discount"]["points"]
@@ -296,63 +308,105 @@ class ConfluenceScorer:
                 pd_data   = smc_analysis.get("premium_discount", {})
                 zone_name = pd_data.get("zone", "")
                 reasons.append(
-                    f"✅ Harga di {zone_name} Zone → area ideal entry"
+                    f"✅ Harga di {zone_name} Zone — ideal entry"
                 )
             else:
                 breakdown["premium_discount"] = 0
-                reasons.append(
-                    "❌ Harga tidak di area Premium/Discount"
-                )
+                reasons.append("❌ Harga tidak di area Premium/Discount")
 
             # ══════════════════════════════════
             # FIBONACCI
             # ══════════════════════════════════
 
-            # 12. Fibonacci 0.618 (2 poin)
-            fib_level    = fib_analysis.get("fib_level", "")
-            fib_at       = fib_analysis.get("at_fib", False)
+            # 12. Fib 0.618 (2 poin)
+            fib_level = fib_analysis.get("fib_level", "")
+            fib_at    = fib_analysis.get("at_fib", False)
 
             if fib_at and fib_level == "0.618":
                 pts = self.score_definitions["fib_618"]["points"]
                 score += pts
                 breakdown["fib_618"] = pts
                 reasons.append(
-                    "✅ Fibonacci 0.618 (Golden Ratio) → level terkuat!"
+                    "✅ Fibonacci 0.618 (Golden Ratio) — level terkuat!"
                 )
             else:
                 breakdown["fib_618"] = 0
 
-            # 13. Fibonacci 0.500 (1 poin)
+            # 13. Fib 0.500 (1 poin)
             if fib_at and fib_level == "0.500":
                 pts = self.score_definitions["fib_50"]["points"]
                 score += pts
                 breakdown["fib_50"] = pts
-                reasons.append(
-                    "✅ Fibonacci 0.500 → midpoint level penting"
-                )
+                reasons.append("✅ Fibonacci 0.500 — midpoint")
             else:
                 breakdown["fib_50"] = 0
 
             if fib_at and fib_level not in ["0.618", "0.500"]:
                 reasons.append(
-                    f"⚠️ Fibonacci {fib_level} (level minor, no extra points)"
+                    f"⚠️ Fibonacci {fib_level} (level minor)"
                 )
 
             # ══════════════════════════════════
-            # FILTERS
+            # INSTITUTIONAL FILTERS
             # ══════════════════════════════════
 
-            # 14. Killzone (1 poin)
-            in_killzone  = session_info.get("in_killzone", False)
+            # 14. VWAP Zone (maks 2 poin)
+            vwap_bonus  = vwap_result.get("score_bonus", 0)
+            vwap_pass   = vwap_result.get("pass", True)
+            vwap_reason = vwap_result.get("reason", "")
+
+            if vwap_bonus >= 2:
+                pts = 2
+                score += pts
+                breakdown["vwap_ok"] = pts
+                reasons.append(vwap_reason or "✅ VWAP zone ideal")
+            elif vwap_bonus == 1:
+                score += 1
+                breakdown["vwap_ok"] = 1
+                reasons.append(vwap_reason or "⚠️ VWAP near — 1 poin")
+            else:
+                breakdown["vwap_ok"] = 0
+                if vwap_reason:
+                    reasons.append(vwap_reason)
+                else:
+                    reasons.append("❌ VWAP zone tidak ideal")
+
+            # 15. Funding Rate (maks 1 poin)
+            fund_bonus  = funding_result.get("score_bonus", 0)
+            fund_pass   = funding_result.get("pass", True)
+            fund_reason = funding_result.get("reason", "")
+            fund_rate   = funding_result.get("rate", 0.0)
+
+            if fund_bonus >= 1:
+                pts = 1
+                score += pts
+                breakdown["funding_ok"] = pts
+                reasons.append(
+                    fund_reason or
+                    f"✅ Funding rate kondusif ({fund_rate:+.4f}%)"
+                )
+            else:
+                breakdown["funding_ok"] = 0
+                reasons.append(
+                    fund_reason or
+                    f"❌ Funding rate tidak kondusif ({fund_rate:+.4f}%)"
+                )
+
+            # ══════════════════════════════════
+            # FILTER
+            # ══════════════════════════════════
+
+            # 16. Killzone (1 poin)
+            in_kz        = session_info.get("in_killzone", False)
             session_name = session_info.get("session_name", "")
             avoid        = session_info.get("should_avoid", False)
 
-            if in_killzone and not avoid:
+            if in_kz and not avoid:
                 pts = self.score_definitions["killzone_ok"]["points"]
                 score += pts
                 breakdown["killzone_ok"] = pts
                 reasons.append(
-                    f"✅ Dalam {session_name} → volume institusi aktif"
+                    f"✅ {session_name} — volume institusi aktif"
                 )
             else:
                 breakdown["killzone_ok"] = 0
@@ -368,7 +422,7 @@ class ConfluenceScorer:
                         f"next: {next_s.get('name', 'N/A')}"
                     )
 
-            # 15. News Clear (1 poin)
+            # 17. News Clear (1 poin)
             is_safe   = news_status.get("is_safe", True)
             news_list = news_status.get("unsafe_news", [])
             if is_safe:
@@ -384,18 +438,48 @@ class ConfluenceScorer:
                 )
 
             # ══════════════════════════════════
+            # HARD BLOCK CHECK
+            # Kalau VWAP atau funding rate FAIL (bukan sekedar 0 poin)
+            # → paksa score di bawah threshold
+            # ══════════════════════════════════
+
+            vwap_hard_fail    = (
+                vwap_result.get("valid", False) and
+                not vwap_pass and
+                cfg.VWAP_ENABLED
+            )
+            funding_hard_fail = (
+                funding_result.get("valid", False) and
+                not fund_pass and
+                cfg.FUNDING_RATE_ENABLED
+            )
+
+            hard_fail = vwap_hard_fail or funding_hard_fail
+
+            # ══════════════════════════════════
             # FINAL SCORE
             # ══════════════════════════════════
 
             min_score = cfg.MIN_CONFLUENCE_SCORE
-            is_valid  = score >= min_score
+            is_valid  = score >= min_score and not hard_fail
             grade     = self._get_grade(score)
+
+            if hard_fail:
+                fail_reason = []
+                if vwap_hard_fail:
+                    fail_reason.append("VWAP zone salah")
+                if funding_hard_fail:
+                    fail_reason.append("Funding rate ekstrem")
+                reasons.append(
+                    f"🚫 HARD BLOCK: {' + '.join(fail_reason)}"
+                )
 
             result = {
                 "score"         : score,
                 "max_score"     : self.max_score,
                 "min_required"  : min_score,
                 "is_valid"      : is_valid,
+                "hard_fail"     : hard_fail,
                 "grade"         : grade,
                 "direction"     : direction,
                 "breakdown"     : breakdown,
@@ -405,15 +489,18 @@ class ConfluenceScorer:
                 "candle_pattern": indicators.get("candle_pattern", []),
                 "breakout_mode" : breakout_info.get("valid", False),
                 "pullback_mode" : pullback_info.get("valid", False),
+                "vwap_zone"     : vwap_result.get("zone"),
+                "funding_rate"  : funding_result.get("rate", 0.0),
             }
 
             status = "✅ VALID" if is_valid else "❌ INVALID"
             logger.info(
-                f"📊 Confluence Score: {score}/{self.max_score} "
+                f"📊 Confluence: {score}/{self.max_score} "
                 f"({grade}) {status} | {direction}"
+                + (" | 🚫 HARD BLOCK" if hard_fail else "")
             )
 
-            if not is_valid:
+            if not is_valid and not hard_fail:
                 missing = min_score - score
                 logger.info(f"   ⚠️ Kurang {missing} poin untuk entry")
 
@@ -432,15 +519,16 @@ class ConfluenceScorer:
 
     @staticmethod
     def _get_grade(score: int) -> str:
-        if score >= 14:
+        """Grade berbasis max 23 poin"""
+        if score >= 20:
             return "A+ (Perfect Setup)"
-        elif score >= 12:
+        elif score >= 17:
             return "A  (Excellent)"
-        elif score >= 11:
+        elif score >= 14:
             return "B+ (Good)"
-        elif score >= 9:
+        elif score >= 11:
             return "B  (Average)"
-        elif score >= 7:
+        elif score >= 8:
             return "C  (Weak)"
         else:
             return "F  (Skip)"
@@ -449,13 +537,19 @@ class ConfluenceScorer:
 
     def get_summary(self, result: dict) -> str:
         score     = result.get("score", 0)
-        max_score = result.get("max_score", 16)
+        max_score = result.get("max_score", 23)
         grade     = result.get("grade", "F")
         direction = result.get("direction", "")
         is_valid  = result.get("is_valid", False)
+        hard_fail = result.get("hard_fail", False)
         reasons   = result.get("reasons", [])
 
-        status = "🟢 ENTRY VALID" if is_valid else "🔴 SKIP"
+        if hard_fail:
+            status = "🚫 HARD BLOCK"
+        elif is_valid:
+            status = "🟢 ENTRY VALID"
+        else:
+            status = "🔴 SKIP"
 
         mode_tags = []
         if result.get("breakout_mode"):
@@ -464,23 +558,27 @@ class ConfluenceScorer:
             mode_tags.append("PULLBACK")
         mode_str = " | ".join(mode_tags) if mode_tags else "SMC"
 
+        vwap_zone    = result.get("vwap_zone", "")
+        funding_rate = result.get("funding_rate", 0.0)
+
         lines = [
             f"\n{'='*45}",
             f"📊 CONFLUENCE SCORE: {score}/{max_score}",
             f"Grade    : {grade}",
             f"Mode     : {mode_str}",
             f"Direction: {direction}",
+            f"VWAP     : {vwap_zone or 'N/A'}",
+            f"Funding  : {funding_rate:+.4f}%",
             f"Status   : {status}",
             f"{'='*45}",
             "\n📋 DETAIL SCORE:",
         ]
         lines.extend(reasons)
 
-        if not is_valid:
+        if not is_valid and not hard_fail:
             missing = result.get("min_required", 11) - score
             lines.append(
-                f"\n⚠️ Kurang {missing} poin untuk entry. "
-                f"Bot akan skip setup ini."
+                f"\n⚠️ Kurang {missing} poin untuk entry."
             )
 
         return "\n".join(lines)

@@ -294,9 +294,9 @@ class TelegramNotifier:
                 )
 
             elif cmd == "/score":
-                # FIX: update ke max 20
+                # FIX: update ke max 23
                 min_s  = cfg.MIN_CONFLUENCE_SCORE
-                max_s  = 20
+                max_s  = 23
                 phases = (
                     f"  Demo P1 : 10/{max_s}\n"
                     f"  Demo P2 : 13/{max_s}\n"
@@ -439,7 +439,7 @@ class TelegramNotifier:
             f"  Breakout/Pullback + ATR 2.0x SL\n"
             f"  VWAP: {vwap_str} | Funding: {funding_str}\n"
             f"{'='*35}\n"
-            f"🎯 Min Score : <b>{cfg.MIN_CONFLUENCE_SCORE}/20</b>\n"
+            f"🎯 Min Score : <b>{cfg.MIN_CONFLUENCE_SCORE}/23</b>\n"
             f"⏰ Killzone  : London & New York\n"
             f"{'='*35}\n"
             f"🤖 Bot monitoring market...\n"
@@ -959,7 +959,7 @@ class TelegramNotifier:
             f"⏱️ Uptime : <b>{uptime:.1f} jam</b>\n"
             f"💰 Balance : <b>${balance:.4f}</b>\n"
             f"📊 Open    : <b>{open_trades} trade(s)</b>\n"
-            f"🎯 Score   : min {cfg.MIN_CONFLUENCE_SCORE}/20\n"
+            f"🎯 Score   : min {cfg.MIN_CONFLUENCE_SCORE}/23\n"
             f"{'='*35}\n"
             f"🤖 Semua sistem normal!\n"
             f"⏰ {_wib_str()}"

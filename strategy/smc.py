@@ -1,11 +1,27 @@
 # ============================================
 # VORTEX BOT - SMART MONEY CONCEPT (SMC)
 # ============================================
+#
+# FIX v1.3:
+#   - BOS Freshness Check
+#     BOS/CHoCH hanya dihitung valid kalau terjadi
+#     dalam BOS_FRESHNESS_CANDLES candle terakhir.
+#     Sebelumnya: BOS yang terjadi 50 candle lalu
+#     masih dihitung = sinyal stale.
+#     Sekarang: BOS > 10 candle lalu = stale.
+#
+#   - Return dict tambah: bos_4h_fresh, choch_4h_fresh,
+#     bos_1h_fresh, choch_1h_fresh → dipakai confluence
+#     untuk bedakan BOS fresh vs stale.
 
 import pandas as pd
 import numpy as np
 from config import cfg
 from logger import logger
+
+# Maks candle sejak BOS agar masih dianggap "fresh"
+# 10 candle di 1H = 10 jam | 10 candle di 4H = 40 jam
+BOS_FRESHNESS_CANDLES = 10
 
 
 class SMCAnalysis:
@@ -15,7 +31,6 @@ class SMCAnalysis:
     @staticmethod
     def find_swing_points(df: pd.DataFrame,
                           lookback: int = None) -> dict:
-        """Deteksi swing high dan swing low"""
         try:
             if lookback is None:
                 lookback = cfg.SMC_SWING_LOOKBACK
@@ -24,23 +39,21 @@ class SMCAnalysis:
             lows  = []
 
             for i in range(lookback, len(df) - lookback):
-                # Swing High
                 if df["high"].iloc[i] == df["high"].iloc[
                     i-lookback:i+lookback+1
                 ].max():
                     highs.append({
                         "index": i,
-                        "price": df["high"].iloc[i],
+                        "price": float(df["high"].iloc[i]),
                         "time" : df.index[i],
                     })
 
-                # Swing Low
                 if df["low"].iloc[i] == df["low"].iloc[
                     i-lookback:i+lookback+1
                 ].min():
                     lows.append({
                         "index": i,
-                        "price": df["low"].iloc[i],
+                        "price": float(df["low"].iloc[i]),
                         "time" : df.index[i],
                     })
 
@@ -53,233 +66,298 @@ class SMCAnalysis:
 
         except Exception as e:
             logger.error(f"❌ Swing points error: {e}")
-            return {"swing_highs": [], "swing_lows": [],
-                    "last_high": None, "last_low": None}
+            return {
+                "swing_highs": [], "swing_lows": [],
+                "last_high": None, "last_low": None,
+            }
+
+    # ─── BOS FRESHNESS CHECK ────────────────
+
+    @staticmethod
+    def _check_bos_freshness(df: pd.DataFrame,
+                              bos: bool,
+                              choch: bool,
+                              highs: list,
+                              lows: list,
+                              direction: str) -> dict:
+        """
+        Cek apakah BOS/CHoCH terjadi dalam N candle terakhir.
+
+        Logic:
+        - Ambil swing high/low terakhir sebagai level BOS
+        - Scan candle setelah swing tersebut
+        - Cari candle pertama yang close melewati level
+        - Hitung jarak ke candle terakhir
+        - Kalau > BOS_FRESHNESS_CANDLES → stale
+        """
+        try:
+            if not bos and not choch:
+                return {
+                    "bos_fresh"        : False,
+                    "choch_fresh"      : False,
+                    "bos_candles_ago"  : None,
+                    "choch_candles_ago": None,
+                }
+
+            total   = len(df)
+            closes  = df["close"].values
+            fresh_n = BOS_FRESHNESS_CANDLES
+
+            bos_candles_ago   = None
+            choch_candles_ago = None
+
+            # BOS: candle pertama close melewati swing level
+            if direction == "BUY" and highs:
+                level     = highs[-1]["price"]
+                start_idx = highs[-1]["index"] + 1
+                for i in range(start_idx, total):
+                    if closes[i] > level:
+                        bos_candles_ago = total - 1 - i
+                        break
+
+            elif direction == "SELL" and lows:
+                level     = lows[-1]["price"]
+                start_idx = lows[-1]["index"] + 1
+                for i in range(start_idx, total):
+                    if closes[i] < level:
+                        bos_candles_ago = total - 1 - i
+                        break
+
+            # CHoCH: pakai swing sebelumnya (index -2)
+            if direction == "BUY" and len(highs) >= 2:
+                level     = highs[-2]["price"]
+                start_idx = highs[-2]["index"] + 1
+                for i in range(start_idx, total):
+                    if closes[i] > level:
+                        choch_candles_ago = total - 1 - i
+                        break
+
+            elif direction == "SELL" and len(lows) >= 2:
+                level     = lows[-2]["price"]
+                start_idx = lows[-2]["index"] + 1
+                for i in range(start_idx, total):
+                    if closes[i] < level:
+                        choch_candles_ago = total - 1 - i
+                        break
+
+            bos_fresh = (
+                bos_candles_ago is not None and
+                bos_candles_ago <= fresh_n
+            )
+            choch_fresh = (
+                choch_candles_ago is not None and
+                choch_candles_ago <= fresh_n
+            )
+
+            logger.debug(
+                f"📊 BOS freshness [{direction}]: "
+                f"bos={bos_candles_ago}c (fresh={bos_fresh}) | "
+                f"choch={choch_candles_ago}c (fresh={choch_fresh})"
+            )
+
+            return {
+                "bos_fresh"        : bos_fresh,
+                "choch_fresh"      : choch_fresh,
+                "bos_candles_ago"  : bos_candles_ago,
+                "choch_candles_ago": choch_candles_ago,
+            }
+
+        except Exception as e:
+            logger.error(f"❌ BOS freshness error: {e}")
+            return {
+                "bos_fresh"        : bos,
+                "choch_fresh"      : choch,
+                "bos_candles_ago"  : None,
+                "choch_candles_ago": None,
+            }
 
     # ─── MARKET STRUCTURE ───────────────────
 
     def detect_market_structure(self,
                                 df: pd.DataFrame) -> dict:
-        """
-        Deteksi BOS dan CHoCH.
-
-        FIX: Sebelumnya langsung return UNKNOWN kalau
-        swing points < 2. Sekarang ada fallback:
-        kalau tidak cukup swing, pakai simple price
-        action (EMA slope atau last N candles) untuk
-        tentukan direction daripada return None.
-        """
+        """Deteksi BOS dan CHoCH + freshness check."""
         try:
             swings = self.find_swing_points(df)
             highs  = swings["swing_highs"]
             lows   = swings["swing_lows"]
 
-            # ── FIX: Fallback kalau swing tidak cukup ────────────────────────
-            # Dengan SMC_SWING_LOOKBACK=15 dan 200 candle data,
-            # seharusnya selalu ada swing. Tapi kalau market
-            # benar-benar flat, pakai close price sederhana.
             if len(highs) < 2 or len(lows) < 2:
                 logger.debug(
-                    f"⚠️ Swing points kurang "
-                    f"(highs={len(highs)}, lows={len(lows)}) "
-                    f"→ pakai price action fallback"
+                    f"⚠️ Swing kurang "
+                    f"(H={len(highs)},L={len(lows)}) "
+                    f"→ fallback"
                 )
                 return self._price_action_fallback(df)
 
-            current_price = df["close"].iloc[-1]
+            current_price = float(df["close"].iloc[-1])
 
-            # Trend berdasarkan Higher High / Higher Low
             hh = highs[-1]["price"] > highs[-2]["price"]
             hl = lows[-1]["price"]  > lows[-2]["price"]
             lh = highs[-1]["price"] < highs[-2]["price"]
             ll = lows[-1]["price"]  < lows[-2]["price"]
 
             if hh and hl:
-                structure = "UPTREND"
-                direction = "BUY"
+                structure = "UPTREND";   direction = "BUY"
             elif lh and ll:
-                structure = "DOWNTREND"
-                direction = "SELL"
+                structure = "DOWNTREND"; direction = "SELL"
             else:
-                # ── FIX: RANGING bukan langsung None ─────────────────────────
-                # Sebelumnya: structure=RANGING → direction=None → SMC invalid
-                # Sekarang: RANGING tetap kasih direction dari bias terkuat
-                # (apakah lebih banyak HH atau LL dalam swing terakhir)
                 structure = "RANGING"
-                direction = self._ranging_bias(highs, lows, current_price)
+                direction = self._ranging_bias(
+                    highs, lows, current_price
+                )
                 logger.debug(
-                    f"📊 Market RANGING → bias direction: {direction}"
+                    f"📊 RANGING → bias: {direction}"
                 )
 
-            # BOS Bullish: close di atas swing high terakhir
             bos_bullish = current_price > highs[-1]["price"]
-            # BOS Bearish: close di bawah swing low terakhir
             bos_bearish = current_price < lows[-1]["price"]
             bos         = bos_bullish or bos_bearish
 
-            # CHoCH = struktur sebelumnya berlawanan dgn break terbaru
-            choch_bullish = (lh and ll and bos_bullish)
-            choch_bearish = (hh and hl and bos_bearish)
+            choch_bullish = lh and ll and bos_bullish
+            choch_bearish = hh and hl and bos_bearish
             choch         = choch_bullish or choch_bearish
 
+            # FIX v1.3: freshness
+            freshness = self._check_bos_freshness(
+                df=df, bos=bos, choch=choch,
+                highs=highs, lows=lows, direction=direction,
+            )
+
             return {
-                "structure"    : structure,
-                "direction"    : direction,
-                "bos"          : bos,
-                "bos_bullish"  : bos_bullish,
-                "bos_bearish"  : bos_bearish,
-                "choch"        : choch,
-                "choch_bullish": choch_bullish,
-                "choch_bearish": choch_bearish,
-                "last_high"    : highs[-1]["price"],
-                "last_low"     : lows[-1]["price"],
-                "higher_high"  : hh,
-                "higher_low"   : hl,
-                "lower_high"   : lh,
-                "lower_low"    : ll,
+                "structure"        : structure,
+                "direction"        : direction,
+                "bos"              : bos,
+                "bos_bullish"      : bos_bullish,
+                "bos_bearish"      : bos_bearish,
+                "choch"            : choch,
+                "choch_bullish"    : choch_bullish,
+                "choch_bearish"    : choch_bearish,
+                "last_high"        : highs[-1]["price"],
+                "last_low"         : lows[-1]["price"],
+                "higher_high"      : hh,
+                "higher_low"       : hl,
+                "lower_high"       : lh,
+                "lower_low"        : ll,
+                "bos_fresh"        : freshness["bos_fresh"],
+                "choch_fresh"      : freshness["choch_fresh"],
+                "bos_candles_ago"  : freshness["bos_candles_ago"],
+                "choch_candles_ago": freshness["choch_candles_ago"],
             }
 
         except Exception as e:
             logger.error(f"❌ Market structure error: {e}")
             return {
-                "structure": "UNKNOWN",
-                "bos"      : False,
-                "choch"    : False,
-                "direction": None,
+                "structure"  : "UNKNOWN",
+                "bos"        : False,
+                "choch"      : False,
+                "direction"  : None,
+                "bos_fresh"  : False,
+                "choch_fresh": False,
             }
 
     @staticmethod
-    def _ranging_bias(highs: list, lows: list,
-                      current_price: float) -> str:
-        """
-        Tentukan bias di market ranging.
-        Pakai posisi harga relatif terhadap midpoint
-        swing high & swing low terakhir.
-        """
+    def _ranging_bias(highs, lows, current_price) -> str:
         try:
-            last_high = highs[-1]["price"]
-            last_low  = lows[-1]["price"]
-            midpoint  = (last_high + last_low) / 2
-
-            # Harga di atas midpoint → bias BUY (discount zone)
-            # Harga di bawah midpoint → bias SELL (premium zone)
-            if current_price >= midpoint:
-                return "BUY"
-            else:
-                return "SELL"
+            mid = (highs[-1]["price"] + lows[-1]["price"]) / 2
+            return "BUY" if current_price >= mid else "SELL"
         except Exception:
-            return "BUY"  # default fallback
+            return "BUY"
 
     @staticmethod
     def _price_action_fallback(df: pd.DataFrame) -> dict:
-        """
-        Fallback kalau swing points tidak cukup.
-        Pakai slope 20 candle terakhir untuk direction.
-        """
         try:
             recent = df.tail(20)
-            first_close = recent["close"].iloc[0]
-            last_close  = recent["close"].iloc[-1]
+            fc     = float(recent["close"].iloc[0])
+            lc     = float(recent["close"].iloc[-1])
 
-            if last_close > first_close * 1.001:
-                direction = "BUY"
-                structure = "UPTREND"
-            elif last_close < first_close * 0.999:
-                direction = "SELL"
-                structure = "DOWNTREND"
+            if lc > fc * 1.001:
+                direction = "BUY";  structure = "UPTREND"
+            elif lc < fc * 0.999:
+                direction = "SELL"; structure = "DOWNTREND"
             else:
-                # Benar-benar flat — pakai midpoint
-                high = recent["high"].max()
-                low  = recent["low"].min()
-                mid  = (high + low) / 2
-                direction = "BUY" if last_close >= mid else "SELL"
+                h   = float(recent["high"].max())
+                l   = float(recent["low"].min())
+                direction = "BUY" if lc >= (h+l)/2 else "SELL"
                 structure = "RANGING"
 
-            logger.debug(
-                f"📊 Price action fallback: "
-                f"{structure} → {direction}"
-            )
-
             return {
-                "structure"    : structure,
-                "direction"    : direction,
-                "bos"          : False,
-                "bos_bullish"  : False,
-                "bos_bearish"  : False,
-                "choch"        : False,
-                "choch_bullish": False,
-                "choch_bearish": False,
-                "last_high"    : df["high"].tail(20).max(),
-                "last_low"     : df["low"].tail(20).min(),
-                "higher_high"  : False,
-                "higher_low"   : False,
-                "lower_high"   : False,
-                "lower_low"    : False,
-                "fallback"     : True,
+                "structure"        : structure,
+                "direction"        : direction,
+                "bos"              : False,
+                "bos_bullish"      : False,
+                "bos_bearish"      : False,
+                "choch"            : False,
+                "choch_bullish"    : False,
+                "choch_bearish"    : False,
+                "last_high"        : float(df["high"].tail(20).max()),
+                "last_low"         : float(df["low"].tail(20).min()),
+                "higher_high"      : False,
+                "higher_low"       : False,
+                "lower_high"       : False,
+                "lower_low"        : False,
+                "bos_fresh"        : False,
+                "choch_fresh"      : False,
+                "bos_candles_ago"  : None,
+                "choch_candles_ago": None,
+                "fallback"         : True,
             }
         except Exception as e:
-            logger.error(f"❌ Price action fallback error: {e}")
+            logger.error(f"❌ Fallback error: {e}")
             return {
-                "structure": "UNKNOWN",
-                "direction": None,
-                "bos"      : False,
-                "choch"    : False,
+                "structure": "UNKNOWN", "direction": None,
+                "bos": False, "choch": False,
+                "bos_fresh": False, "choch_fresh": False,
             }
 
     # ─── ORDER BLOCKS ───────────────────────
 
-    def detect_order_blocks(self,
-                            df: pd.DataFrame,
+    def detect_order_blocks(self, df: pd.DataFrame,
                             direction: str) -> list:
-        """Deteksi Order Block valid"""
         try:
             obs      = []
             lookback = cfg.OB_LOOKBACK
 
             for i in range(1, min(lookback, len(df)-1)):
-                idx = -(i+1)
-
+                idx    = -(i+1)
                 curr   = df.iloc[idx]
                 next_c = df.iloc[idx+1]
 
-                # Bullish OB: candle bearish sebelum impulse naik kuat
                 if direction == "BUY":
-                    is_bearish   = curr["close"] < curr["open"]
-                    next_bullish = next_c["close"] > next_c["open"]
-                    strong_move  = (
+                    is_bearish  = curr["close"] < curr["open"]
+                    nxt_bull    = next_c["close"] > next_c["open"]
+                    strong      = (
                         (next_c["close"] - next_c["open"]) >
                         (curr["open"] - curr["close"]) * 1.2
                     )
-
-                    if is_bearish and next_bullish and strong_move:
+                    if is_bearish and nxt_bull and strong:
                         obs.append({
-                            "type"    : "Bullish OB",
-                            "top"     : curr["open"],
-                            "bottom"  : curr["close"],
-                            "mid"     : (curr["open"] + curr["close"]) / 2,
-                            "time"    : df.index[idx],
-                            "strength": strong_move,
-                            "valid"   : True,
+                            "type"       : "Bullish OB",
+                            "top"        : float(curr["open"]),
+                            "bottom"     : float(curr["close"]),
+                            "mid"        : (float(curr["open"]) + float(curr["close"])) / 2,
+                            "time"       : df.index[idx],
+                            "strength"   : strong,
+                            "valid"      : True,
+                            "candles_ago": i,
                         })
 
-                # Bearish OB: candle bullish sebelum impulse turun kuat
                 elif direction == "SELL":
-                    is_bullish   = curr["close"] > curr["open"]
-                    next_bearish = next_c["close"] < next_c["open"]
-                    strong_move  = (
+                    is_bullish = curr["close"] > curr["open"]
+                    nxt_bear   = next_c["close"] < next_c["open"]
+                    strong     = (
                         (next_c["open"] - next_c["close"]) >
                         (curr["close"] - curr["open"]) * 1.2
                     )
-
-                    if is_bullish and next_bearish and strong_move:
+                    if is_bullish and nxt_bear and strong:
                         obs.append({
-                            "type"    : "Bearish OB",
-                            "top"     : curr["close"],
-                            "bottom"  : curr["open"],
-                            "mid"     : (curr["open"] + curr["close"]) / 2,
-                            "time"    : df.index[idx],
-                            "strength": strong_move,
-                            "valid"   : True,
+                            "type"       : "Bearish OB",
+                            "top"        : float(curr["close"]),
+                            "bottom"     : float(curr["open"]),
+                            "mid"        : (float(curr["open"]) + float(curr["close"])) / 2,
+                            "time"       : df.index[idx],
+                            "strength"   : strong,
+                            "valid"      : True,
+                            "candles_ago": i,
                         })
 
             return obs[:3]
@@ -288,9 +366,7 @@ class SMCAnalysis:
             logger.error(f"❌ Order block error: {e}")
             return []
 
-    def is_price_in_ob(self, price: float,
-                       obs: list) -> dict:
-        """Cek apakah harga berada di area OB"""
+    def is_price_in_ob(self, price: float, obs: list) -> dict:
         for ob in obs:
             if ob["bottom"] <= price <= ob["top"]:
                 return {
@@ -304,52 +380,39 @@ class SMCAnalysis:
 
     def detect_fvg(self, df: pd.DataFrame,
                    direction: str) -> list:
-        """
-        Deteksi Fair Value Gap.
-
-        FIX: FVG_MIN_SIZE dibaca dari cfg (sekarang 0.05%)
-        setelah diturunkan dari 0.1% di config.py.
-        """
         try:
             fvgs = []
-
             for i in range(2, min(cfg.OB_LOOKBACK, len(df))):
-                idx1 = -(i+1)
-                idx2 = -i
-                idx3 = -(i-1)
+                c1 = df.iloc[-(i+1)]
+                c3 = df.iloc[-(i-1)]
 
-                c1 = df.iloc[idx1]
-                c3 = df.iloc[idx3]
-
-                # Bullish FVG: low candle 3 > high candle 1
                 if direction == "BUY":
-                    gap = c3["low"] - c1["high"]
+                    gap = float(c3["low"]) - float(c1["high"])
                     if gap > 0:
-                        gap_pct = gap / c1["high"] * 100
-                        if gap_pct >= cfg.FVG_MIN_SIZE:
+                        pct = gap / float(c1["high"]) * 100
+                        if pct >= cfg.FVG_MIN_SIZE:
                             fvgs.append({
                                 "type"  : "Bullish FVG",
-                                "top"   : c3["low"],
-                                "bottom": c1["high"],
-                                "mid"   : (c3["low"] + c1["high"]) / 2,
-                                "size"  : gap_pct,
-                                "time"  : df.index[idx2],
+                                "top"   : float(c3["low"]),
+                                "bottom": float(c1["high"]),
+                                "mid"   : (float(c3["low"]) + float(c1["high"])) / 2,
+                                "size"  : pct,
+                                "time"  : df.index[-i],
                                 "filled": False,
                             })
 
-                # Bearish FVG: high candle 3 < low candle 1
                 elif direction == "SELL":
-                    gap = c1["low"] - c3["high"]
+                    gap = float(c1["low"]) - float(c3["high"])
                     if gap > 0:
-                        gap_pct = gap / c1["low"] * 100
-                        if gap_pct >= cfg.FVG_MIN_SIZE:
+                        pct = gap / float(c1["low"]) * 100
+                        if pct >= cfg.FVG_MIN_SIZE:
                             fvgs.append({
                                 "type"  : "Bearish FVG",
-                                "top"   : c1["low"],
-                                "bottom": c3["high"],
-                                "mid"   : (c1["low"] + c3["high"]) / 2,
-                                "size"  : gap_pct,
-                                "time"  : df.index[idx2],
+                                "top"   : float(c1["low"]),
+                                "bottom": float(c3["high"]),
+                                "mid"   : (float(c1["low"]) + float(c3["high"])) / 2,
+                                "size"  : pct,
+                                "time"  : df.index[-i],
                                 "filled": False,
                             })
 
@@ -361,7 +424,6 @@ class SMCAnalysis:
 
     def is_price_in_fvg(self, price: float,
                         fvgs: list) -> dict:
-        """Cek apakah harga di dalam FVG"""
         for fvg in fvgs:
             if fvg["bottom"] <= price <= fvg["top"]:
                 return {
@@ -374,53 +436,37 @@ class SMCAnalysis:
 
     # ─── LIQUIDITY ZONES ────────────────────
 
-    def detect_liquidity(self,
-                         df: pd.DataFrame) -> dict:
-        """Deteksi area liquidity (BSL & SSL)"""
+    def detect_liquidity(self, df: pd.DataFrame) -> dict:
         try:
-            lookback = cfg.LIQUIDITY_LOOKBACK
-            recent   = df.tail(lookback)
+            recent = df.tail(cfg.LIQUIDITY_LOOKBACK)
+            highs  = recent["high"].values
+            lows   = recent["low"].values
 
-            highs      = recent["high"].values
             bsl_levels = []
-
             for i in range(len(highs)-1):
                 for j in range(i+1, len(highs)):
-                    diff = abs(highs[i] - highs[j]) / highs[i]
-                    if diff < 0.001:
-                        bsl_levels.append(
-                            (highs[i] + highs[j]) / 2
-                        )
+                    if abs(highs[i] - highs[j]) / highs[i] < 0.001:
+                        bsl_levels.append((highs[i]+highs[j])/2)
 
-            lows       = recent["low"].values
             ssl_levels = []
-
             for i in range(len(lows)-1):
                 for j in range(i+1, len(lows)):
-                    diff = abs(lows[i] - lows[j]) / lows[i]
-                    if diff < 0.001:
-                        ssl_levels.append(
-                            (lows[i] + lows[j]) / 2
-                        )
+                    if abs(lows[i] - lows[j]) / lows[i] < 0.001:
+                        ssl_levels.append((lows[i]+lows[j])/2)
 
-            current_price = df["close"].iloc[-1]
-
-            bsl_above   = [b for b in bsl_levels if b > current_price]
+            cp          = float(df["close"].iloc[-1])
+            bsl_above   = [b for b in bsl_levels if b > cp]
+            ssl_below   = [s for s in ssl_levels if s < cp]
             nearest_bsl = min(bsl_above) if bsl_above else None
-
-            ssl_below   = [s for s in ssl_levels if s < current_price]
             nearest_ssl = max(ssl_below) if ssl_below else None
-
-            recent_highs = df["high"].iloc[-5:]
-            recent_lows  = df["low"].iloc[-5:]
 
             bsl_swept = bool(
                 nearest_bsl and
-                (recent_highs > nearest_bsl).any()
+                (df["high"].iloc[-5:] > nearest_bsl).any()
             )
             ssl_swept = bool(
                 nearest_ssl and
-                (recent_lows < nearest_ssl).any()
+                (df["low"].iloc[-5:] < nearest_ssl).any()
             )
 
             return {
@@ -430,7 +476,7 @@ class SMCAnalysis:
                 "nearest_ssl"  : nearest_ssl,
                 "bsl_swept"    : bsl_swept,
                 "ssl_swept"    : ssl_swept,
-                "current_price": current_price,
+                "current_price": cp,
             }
 
         except Exception as e:
@@ -442,39 +488,35 @@ class SMCAnalysis:
     @staticmethod
     def get_premium_discount(df: pd.DataFrame,
                              lookback: int = 50) -> dict:
-        """Tentukan Premium & Discount Zone"""
         try:
             recent  = df.tail(lookback)
-            high    = recent["high"].max()
-            low     = recent["low"].min()
+            high    = float(recent["high"].max())
+            low     = float(recent["low"].min())
             mid     = (high + low) / 2
-            current = df["close"].iloc[-1]
-
-            range_size = high - low
-            fib_50     = low + range_size * 0.5
-            fib_618    = low + range_size * 0.618
+            current = float(df["close"].iloc[-1])
+            rng     = high - low
 
             is_discount = current < mid
-            is_premium  = current > mid
-
-            if is_discount:
-                depth = (mid - current) / (mid - low) * 100
-            else:
-                depth = (current - mid) / (high - mid) * 100
+            depth = (
+                (mid - current) / (mid - low) * 100
+                if is_discount and (mid - low) > 0
+                else (current - mid) / (high - mid) * 100
+                if (high - mid) > 0 else 0
+            )
 
             return {
                 "high"       : high,
                 "low"        : low,
                 "mid"        : mid,
-                "fib_50"     : fib_50,
-                "fib_618"    : fib_618,
+                "fib_50"     : low + rng * 0.5,
+                "fib_618"    : low + rng * 0.618,
                 "current"    : current,
                 "is_discount": is_discount,
-                "is_premium" : is_premium,
+                "is_premium" : not is_discount,
                 "zone"       : "DISCOUNT" if is_discount else "PREMIUM",
                 "depth_pct"  : depth,
                 "ideal_buy"  : is_discount,
-                "ideal_sell" : is_premium,
+                "ideal_sell" : not is_discount,
             }
 
         except Exception as e:
@@ -483,77 +525,57 @@ class SMCAnalysis:
 
     # ─── BREAKER BLOCK ──────────────────────
 
-    def detect_breaker_block(self,
-                             df: pd.DataFrame,
+    def detect_breaker_block(self, df: pd.DataFrame,
                              direction: str) -> list:
-        """Deteksi Breaker Block (OB yang gagal)"""
         try:
             breakers = []
             obs      = self.detect_order_blocks(df, direction)
-
+            current  = float(df["close"].iloc[-1])
             for ob in obs:
-                current = df["close"].iloc[-1]
-
-                if direction == "BUY":
-                    if current > ob["top"]:
-                        breakers.append({
-                            "type" : "Bullish Breaker",
-                            "level": ob["top"],
-                            "zone" : (ob["bottom"], ob["top"]),
-                        })
-
-                elif direction == "SELL":
-                    if current < ob["bottom"]:
-                        breakers.append({
-                            "type" : "Bearish Breaker",
-                            "level": ob["bottom"],
-                            "zone" : (ob["bottom"], ob["top"]),
-                        })
-
+                if direction == "BUY" and current > ob["top"]:
+                    breakers.append({
+                        "type" : "Bullish Breaker",
+                        "level": ob["top"],
+                        "zone" : (ob["bottom"], ob["top"]),
+                    })
+                elif direction == "SELL" and current < ob["bottom"]:
+                    breakers.append({
+                        "type" : "Bearish Breaker",
+                        "level": ob["bottom"],
+                        "zone" : (ob["bottom"], ob["top"]),
+                    })
             return breakers
-
         except Exception as e:
             logger.error(f"❌ Breaker block error: {e}")
             return []
 
     # ─── INDUCEMENT ─────────────────────────
 
-    def detect_inducement(self,
-                          df: pd.DataFrame,
+    def detect_inducement(self, df: pd.DataFrame,
                           direction: str) -> dict:
-        """Deteksi Inducement (liquidity trap)"""
         try:
-            lookback = 10
-            recent   = df.tail(lookback)
-
+            recent = df.tail(10)
             if direction == "BUY":
                 lows = recent["low"].values
                 for i in range(len(lows)-2):
-                    diff = abs(lows[i] - lows[i+1]) / lows[i]
-                    if diff < 0.002:
+                    if abs(lows[i] - lows[i+1]) / lows[i] < 0.002:
                         return {
                             "detected"   : True,
                             "type"       : "Bullish Inducement",
-                            "level"      : (lows[i] + lows[i+1]) / 2,
-                            "description": "Equal lows terdeteksi "
-                                          "→ potensi liquidity grab",
+                            "level"      : (lows[i]+lows[i+1])/2,
+                            "description": "Equal lows → potensi liquidity grab",
                         }
-
             elif direction == "SELL":
                 highs = recent["high"].values
                 for i in range(len(highs)-2):
-                    diff = abs(highs[i] - highs[i+1]) / highs[i]
-                    if diff < 0.002:
+                    if abs(highs[i]-highs[i+1])/highs[i] < 0.002:
                         return {
                             "detected"   : True,
                             "type"       : "Bearish Inducement",
-                            "level"      : (highs[i] + highs[i+1]) / 2,
-                            "description": "Equal highs terdeteksi "
-                                          "→ potensi liquidity grab",
+                            "level"      : (highs[i]+highs[i+1])/2,
+                            "description": "Equal highs → potensi liquidity grab",
                         }
-
             return {"detected": False, "type": None}
-
         except Exception as e:
             logger.error(f"❌ Inducement error: {e}")
             return {"detected": False}
@@ -563,91 +585,100 @@ class SMCAnalysis:
     def analyze(self, df_4h: pd.DataFrame,
                 df_1h: pd.DataFrame,
                 df_15m: pd.DataFrame) -> dict:
-        """
-        Full SMC analysis multi-timeframe.
-
-        FIX: Sebelumnya langsung return valid=False
-        kalau direction 4H None. Sekarang pakai 1H
-        sebagai fallback kalau 4H tidak bisa tentukan
-        direction (market ranging).
-        """
+        """Full SMC analysis multi-timeframe v1.3"""
         try:
-            # 4H — Bias & Structure
             structure_4h = self.detect_market_structure(df_4h)
             prem_disc_4h = self.get_premium_discount(df_4h)
             liquidity_4h = self.detect_liquidity(df_4h)
 
             direction = structure_4h.get("direction")
 
-            # ── FIX: Fallback ke 1H kalau 4H unclear ─────────────────────────
             if not direction:
-                logger.debug(
-                    "⚠️ 4H direction unclear → "
-                    "fallback ke 1H untuk direction"
-                )
-                structure_1h_bias = self.detect_market_structure(df_1h)
-                direction         = structure_1h_bias.get("direction")
-
+                logger.debug("⚠️ 4H unclear → fallback 1H")
+                s1h_bias  = self.detect_market_structure(df_1h)
+                direction = s1h_bias.get("direction")
                 if not direction:
                     return {
-                        "valid" : False,
-                        "reason": "Market structure unclear on 4H & 1H",
+                        "valid"    : False,
+                        "reason"   : "Structure unclear 4H & 1H",
                         "direction": None,
                     }
 
-            # 1H — Setup
             structure_1h = self.detect_market_structure(df_1h)
             obs_1h       = self.detect_order_blocks(df_1h, direction)
             fvgs_1h      = self.detect_fvg(df_1h, direction)
             liquidity_1h = self.detect_liquidity(df_1h)
             breakers_1h  = self.detect_breaker_block(df_1h, direction)
 
-            # 15M — Entry
-            current_price = df_15m["close"].iloc[-1]
+            current_price = float(df_15m["close"].iloc[-1])
             in_ob         = self.is_price_in_ob(current_price, obs_1h)
             in_fvg        = self.is_price_in_fvg(current_price, fvgs_1h)
             inducement    = self.detect_inducement(df_15m, direction)
 
             liq_swept = (
-                liquidity_1h.get("ssl_swept") if direction == "BUY"
+                liquidity_1h.get("ssl_swept")
+                if direction == "BUY"
                 else liquidity_1h.get("bsl_swept")
             )
 
-            return {
-                "valid"           : True,
-                "direction"       : direction,
+            # Freshness flags
+            bos_4h_fresh   = structure_4h.get("bos_fresh",   False)
+            choch_4h_fresh = structure_4h.get("choch_fresh", False)
+            bos_1h_fresh   = structure_1h.get("bos_fresh",   False)
+            choch_1h_fresh = structure_1h.get("choch_fresh", False)
 
-                # 4H Analysis
-                "structure_4h"    : structure_4h["structure"],
-                "bos_4h"          : structure_4h["bos"],
-                "choch_4h"        : structure_4h["choch"],
-                "premium_discount": prem_disc_4h,
-                "liquidity_4h"    : liquidity_4h,
-                "ideal_zone"      : (
+            bos_4h   = structure_4h.get("bos",   False)
+            choch_4h = structure_4h.get("choch", False)
+            bos_1h   = structure_1h.get("bos",   False)
+            choch_1h = structure_1h.get("choch", False)
+
+            if bos_4h and not bos_4h_fresh:
+                logger.debug(
+                    f"⚠️ BOS 4H stale "
+                    f"({structure_4h.get('bos_candles_ago')}c ago)"
+                )
+            if bos_1h and not bos_1h_fresh:
+                logger.debug(
+                    f"⚠️ BOS 1H stale "
+                    f"({structure_1h.get('bos_candles_ago')}c ago)"
+                )
+
+            return {
+                "valid"               : True,
+                "direction"           : direction,
+                # 4H
+                "structure_4h"        : structure_4h["structure"],
+                "bos_4h"              : bos_4h,
+                "choch_4h"            : choch_4h,
+                "bos_4h_fresh"        : bos_4h_fresh,
+                "choch_4h_fresh"      : choch_4h_fresh,
+                "bos_4h_candles_ago"  : structure_4h.get("bos_candles_ago"),
+                "premium_discount"    : prem_disc_4h,
+                "liquidity_4h"        : liquidity_4h,
+                "ideal_zone"          : (
                     prem_disc_4h.get("ideal_buy")
                     if direction == "BUY"
                     else prem_disc_4h.get("ideal_sell")
                 ),
-
-                # 1H Analysis
-                "structure_1h"  : structure_1h["structure"],
-                "bos_1h"        : structure_1h["bos"],
-                "choch_1h"      : structure_1h["choch"],
-                "order_blocks"  : obs_1h,
-                "fvgs"          : fvgs_1h,
-                "breaker_blocks": breakers_1h,
-                "liquidity_1h"  : liquidity_1h,
-
-                # 15M Analysis
-                "in_ob"          : in_ob["in_ob"],
-                "ob_type"        : in_ob.get("ob_type"),
-                "in_fvg"         : in_fvg["in_fvg"],
-                "fvg_type"       : in_fvg.get("fvg_type"),
-                "liquidity_swept": liq_swept,
-                "inducement"     : inducement,
-
-                # Current price
-                "current_price"  : current_price,
+                # 1H
+                "structure_1h"        : structure_1h["structure"],
+                "bos_1h"              : bos_1h,
+                "choch_1h"            : choch_1h,
+                "bos_1h_fresh"        : bos_1h_fresh,
+                "choch_1h_fresh"      : choch_1h_fresh,
+                "bos_1h_candles_ago"  : structure_1h.get("bos_candles_ago"),
+                "order_blocks"        : obs_1h,
+                "fvgs"                : fvgs_1h,
+                "breaker_blocks"      : breakers_1h,
+                "liquidity_1h"        : liquidity_1h,
+                # 15M
+                "in_ob"               : in_ob["in_ob"],
+                "ob_type"             : in_ob.get("ob_type"),
+                "in_fvg"              : in_fvg["in_fvg"],
+                "fvg_type"            : in_fvg.get("fvg_type"),
+                "liquidity_swept"     : liq_swept,
+                "inducement"          : inducement,
+                "current_price"       : current_price,
             }
 
         except Exception as e:

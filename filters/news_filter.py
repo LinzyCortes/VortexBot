@@ -1,6 +1,22 @@
 # ============================================
 # VORTEX BOT - NEWS & SESSION FILTER
 # ============================================
+#
+# FIX v1.3:
+#   - London killzone delay 15 menit (15:00–15:15 WIB)
+#     Institusi sering sweep liquidity di 15 menit
+#     pertama London sebelum trend sebenarnya jalan.
+#     Bot yang masuk langsung di 15:00 sering kena
+#     false move / stop hunt. Delay 15 menit = tunggu
+#     direction terkonfirmasi dulu.
+#
+#   - NY killzone delay 5 menit (20:30–20:35 WIB)
+#     NY open sering ada spike volatilitas tinggi di
+#     menit pertama. 5 menit cukup untuk filter.
+#
+#   - Upgrade avoid_times: tambah Asia session
+#     (02:00–07:00 WIB) sebagai low-priority skip
+#     karena volume sangat rendah untuk crypto.
 
 import requests
 from datetime import datetime, timezone, timedelta
@@ -222,12 +238,23 @@ class SessionFilter:
       London   : 15:00 – 17:30 WIB
       New York : 20:30 – 23:00 WIB
 
-    FIX v1.1: Killzone transition state sekarang persistent
-    ke DB supaya tidak reset setiap Railway redeploy.
-    Sebelumnya pakai instance variable (_notified_start set)
-    yang hilang setiap restart → NY killzone tidak pernah
-    kirim notif karena state selalu fresh.
+    FIX v1.3:
+      - London delay: skip 15:00–15:15 WIB
+        Institusi sering sweep liquidity di 15 menit
+        pertama sebelum trend jalan. Entry langsung di
+        15:00 → sering kena false move / stop hunt.
+
+      - NY delay: skip 20:30–20:35 WIB
+        Spike volatilitas tinggi di menit pertama NY.
+        5 menit cukup untuk filter initial noise.
+
+      - Killzone state persistent ke DB (dari v1.1)
+        supaya tidak reset setiap Railway redeploy.
     """
+
+    # Delay dalam menit setelah killzone open
+    LONDON_ENTRY_DELAY_MIN = 15   # skip 15:00–15:15 WIB
+    NY_ENTRY_DELAY_MIN     = 5    # skip 20:30–20:35 WIB
 
     def __init__(self):
         self.sessions = {
@@ -237,6 +264,7 @@ class SessionFilter:
                 "pre_open": (14, 45),
                 "name"    : "London Killzone",
                 "pre_name": "Pre-London",
+                "delay"   : self.LONDON_ENTRY_DELAY_MIN,
             },
             "new_york": {
                 "open"    : (20, 30),
@@ -244,31 +272,38 @@ class SessionFilter:
                 "pre_open": (20, 15),
                 "name"    : "New York Killzone",
                 "pre_name": "Pre-NY",
+                "delay"   : self.NY_ENTRY_DELAY_MIN,
             },
         }
 
         self.avoid_times = [
             {
-                "day"   : 0,
+                "day"   : 0,            # Senin
                 "start" : (0, 0),
                 "end"   : (2, 0),
                 "reason": "Monday Open — gap risk",
             },
             {
-                "day"   : 4,
+                "day"   : 4,            # Jumat
                 "start" : (22, 0),
                 "end"   : (23, 59),
                 "reason": "Friday Close — low volume",
             },
         ]
 
-        # ── DB import lazy supaya tidak circular ─────────────────────────────
-        # State disimpan ke DB bukan instance variable supaya
-        # persistent setelah Railway redeploy / restart.
+        # Jam yang selalu di-skip tanpa peduli hari
+        # (low volume Asia, gunakan "all_days" marker)
+        self.avoid_always = [
+            {
+                "start" : (2, 0),
+                "end"   : (7, 0),
+                "reason": "Asia session — low volume crypto",
+            },
+        ]
+
         self._db = None
 
     def _get_db(self):
-        """Lazy import DB untuk hindari circular import"""
         if self._db is None:
             try:
                 from database import db
@@ -280,15 +315,6 @@ class SessionFilter:
     # ─── DB STATE HELPERS ───────────────────
 
     def _get_kz_state(self) -> dict:
-        """
-        Ambil killzone notif state dari DB.
-        Format: {
-            "notified_start": ["london", "new_york"],
-            "notified_end"  : ["london"],
-            "last_active"   : "london",
-            "date"          : "2026-05-13",   ← reset tiap hari
-        }
-        """
         db = self._get_db()
         if not db:
             return {
@@ -301,8 +327,6 @@ class SessionFilter:
         today = datetime.now(WIB).strftime("%Y-%m-%d")
         state = db.get_state("kz_notif_state")
 
-        # Reset state setiap hari baru supaya notif bisa
-        # dikirim lagi keesokan harinya
         if not state or state.get("date") != today:
             fresh = {
                 "notified_start": [],
@@ -316,7 +340,6 @@ class SessionFilter:
         return state
 
     def _save_kz_state(self, state: dict):
-        """Simpan killzone notif state ke DB"""
         db = self._get_db()
         if db:
             db.set_state("kz_notif_state", state)
@@ -331,7 +354,15 @@ class SessionFilter:
         return now_wib, hour_wib, minute, weekday
 
     def is_killzone(self) -> dict:
-        """Cek apakah sekarang dalam killzone"""
+        """
+        Cek apakah sekarang dalam killzone.
+
+        FIX v1.3: Tambah delay setelah open.
+        Kalau masih dalam window delay (misal 15:00–15:15
+        untuk London), return in_killzone=False dengan
+        reason "in_delay" supaya bot skip tapi tidak
+        keliru berpikir sudah di luar killzone.
+        """
         _, hour_wib, minute, _ = self._now_wib()
         now_min = hour_wib * 60 + minute
 
@@ -339,14 +370,44 @@ class SessionFilter:
             open_min  = session["open"][0]  * 60 + session["open"][1]
             close_min = session["close"][0] * 60 + session["close"][1]
             pre_min   = session["pre_open"][0] * 60 + session["pre_open"][1]
+            delay_min = session.get("delay", 0)
+            entry_min = open_min + delay_min  # waktu bot boleh entry
 
             if open_min <= now_min <= close_min:
+                # Dalam killzone window — tapi cek delay dulu
+                if now_min < entry_min:
+                    # Masih dalam delay window → skip entry
+                    mins_to_entry = entry_min - now_min
+                    logger.debug(
+                        f"⏳ {session['name']} delay: "
+                        f"{mins_to_entry} mnt lagi baru entry "
+                        f"(tunggu false move selesai)"
+                    )
+                    return {
+                        "in_killzone"    : False,
+                        "session"        : session["name"],
+                        "session_key"    : key,
+                        "is_pre_session" : False,
+                        "in_delay"       : True,
+                        "delay_reason"   : (
+                            f"{session['name']} delay "
+                            f"{delay_min} mnt — tunggu false move"
+                        ),
+                        "mins_to_entry"  : mins_to_entry,
+                        "next_session"   : {
+                            "name"        : session["name"],
+                            "minutes_away": mins_to_entry,
+                        },
+                    }
+
+                # Delay sudah lewat → in killzone aktif
                 return {
                     "in_killzone"   : True,
                     "session"       : session["name"],
                     "session_key"   : key,
                     "minutes_left"  : close_min - now_min,
                     "is_pre_session": False,
+                    "in_delay"      : False,
                 }
 
             if pre_min <= now_min < open_min:
@@ -355,6 +416,7 @@ class SessionFilter:
                     "session"        : None,
                     "session_key"    : key,
                     "is_pre_session" : True,
+                    "in_delay"       : False,
                     "pre_name"       : session["pre_name"],
                     "minutes_to_open": open_min - now_min,
                     "next_session"   : {
@@ -368,6 +430,7 @@ class SessionFilter:
             "in_killzone"   : False,
             "session"       : None,
             "is_pre_session": False,
+            "in_delay"      : False,
             "next_session"  : next_s,
         }
 
@@ -375,67 +438,81 @@ class SessionFilter:
 
     def check_killzone_transition(self) -> dict:
         """
-        Cek apakah ada transisi killzone yang perlu dinotifikasi.
+        Cek transisi killzone untuk notifikasi Telegram.
+        State persistent ke DB (fix dari v1.1).
 
-        FIX v1.1: State sekarang persistent ke DB.
-        Sebelumnya: instance variable → reset setiap Railway
-        restart → NY killzone tidak pernah notif karena
-        kondisi 'key not in _notified_start' selalu True
-        tapi check di main loop tidak trigger Telegram.
-
-        Sekarang: state disimpan ke DB per-hari, auto-reset
-        tiap hari baru supaya notif bisa jalan lagi esoknya.
+        FIX v1.3: Notif "started" dikirim saat masuk
+        killzone window (bukan setelah delay), supaya
+        user tahu session sudah mulai meski bot belum
+        entry. Log juga menampilkan delay info.
         """
         try:
-            kz        = self.is_killzone()
+            kz       = self.is_killzone()
             _, hour_wib, minute, _ = self._now_wib()
-            wib_time  = f"{hour_wib:02d}:{minute:02d} WIB"
+            wib_time = f"{hour_wib:02d}:{minute:02d} WIB"
 
-            # Ambil state dari DB
-            state           = self._get_kz_state()
-            notified_start  = set(state.get("notified_start", []))
-            notified_end    = set(state.get("notified_end",   []))
-            last_active     = state.get("last_active")
+            state          = self._get_kz_state()
+            notified_start = set(state.get("notified_start", []))
+            notified_end   = set(state.get("notified_end",   []))
+            last_active    = state.get("last_active")
 
-            if kz["in_killzone"]:
-                key     = kz["session_key"]
-                session = kz["session"]
+            # Cek apakah sekarang dalam killzone window
+            # (termasuk delay window untuk notif)
+            _, h, m, _ = self._now_wib()
+            now_min    = h * 60 + m
 
-                if key not in notified_start:
-                    # Pertama kali masuk killzone ini hari ini → kirim notif
-                    notified_start.add(key)
-                    notified_end.discard(key)
+            active_key     = None
+            active_session = None
+            for key, sess in self.sessions.items():
+                open_min  = sess["open"][0]  * 60 + sess["open"][1]
+                close_min = sess["close"][0] * 60 + sess["close"][1]
+                if open_min <= now_min <= close_min:
+                    active_key     = key
+                    active_session = sess["name"]
+                    break
+
+            if active_key:
+                if active_key not in notified_start:
+                    notified_start.add(active_key)
+                    notified_end.discard(active_key)
                     state["notified_start"] = list(notified_start)
                     state["notified_end"]   = list(notified_end)
-                    state["last_active"]    = key
+                    state["last_active"]    = active_key
                     self._save_kz_state(state)
 
+                    sess_cfg  = self.sessions[active_key]
+                    delay_min = sess_cfg.get("delay", 0)
+                    close_min = (
+                        sess_cfg["close"][0] * 60 +
+                        sess_cfg["close"][1]
+                    )
+
                     logger.info(
-                        f"🔔 Killzone STARTED: {session} | {wib_time}"
+                        f"🔔 Killzone STARTED: "
+                        f"{active_session} | {wib_time} | "
+                        f"entry delay: {delay_min} mnt"
                     )
                     return {
                         "event"       : "started",
-                        "session_key" : key,
-                        "session"     : session,
+                        "session_key" : active_key,
+                        "session"     : active_session,
                         "wib_time"    : wib_time,
-                        "minutes_left": kz.get("minutes_left", 0),
+                        "minutes_left": close_min - now_min,
+                        "entry_delay" : delay_min,
                     }
 
-                # Update last_active kalau belum
-                if state.get("last_active") != key:
-                    state["last_active"] = key
+                if state.get("last_active") != active_key:
+                    state["last_active"] = active_key
                     self._save_kz_state(state)
 
             else:
-                # Cek apakah baru keluar dari killzone
                 if (last_active and
                         last_active in notified_start and
                         last_active not in notified_end):
 
                     session_cfg      = self.sessions.get(last_active, {})
                     close_h, close_m = session_cfg.get("close", (0, 0))
-                    now_min          = hour_wib * 60 + minute
-                    close_min        = close_h  * 60 + close_m
+                    close_min        = close_h * 60 + close_m
 
                     if now_min > close_min:
                         notified_end.add(last_active)
@@ -445,9 +522,12 @@ class SessionFilter:
                         state["last_active"]    = None
                         self._save_kz_state(state)
 
-                        session_name = session_cfg.get("name", last_active)
+                        session_name = session_cfg.get(
+                            "name", last_active
+                        )
                         logger.info(
-                            f"🔔 Killzone ENDED: {session_name} | {wib_time}"
+                            f"🔔 Killzone ENDED: "
+                            f"{session_name} | {wib_time}"
                         )
                         return {
                             "event"      : "ended",
@@ -467,28 +547,49 @@ class SessionFilter:
     def _get_next_session(self, current_min: int) -> dict:
         candidates = []
         for key, session in self.sessions.items():
-            open_min = session["open"][0] * 60 + session["open"][1]
-            if open_min > current_min:
+            open_min  = session["open"][0] * 60 + session["open"][1]
+            delay_min = session.get("delay", 0)
+            entry_min = open_min + delay_min
+            if entry_min > current_min:
                 candidates.append({
                     "name"        : session["name"],
-                    "minutes_away": open_min - current_min,
+                    "minutes_away": entry_min - current_min,
                 })
         if candidates:
             return min(candidates, key=lambda x: x["minutes_away"])
 
-        london_open = (
+        london_open  = (
             self.sessions["london"]["open"][0] * 60 +
             self.sessions["london"]["open"][1]
         )
+        london_delay = self.sessions["london"].get("delay", 0)
         return {
             "name"        : "London Killzone (besok)",
-            "minutes_away": (24 * 60 - current_min) + london_open,
+            "minutes_away": (
+                24 * 60 - current_min +
+                london_open + london_delay
+            ),
         }
 
     def is_avoid_time(self) -> dict:
+        """
+        Cek waktu yang dihindari.
+        FIX v1.3: Tambah cek avoid_always (Asia session).
+        """
         _, hour_wib, minute, weekday = self._now_wib()
         now_min = hour_wib * 60 + minute
 
+        # Cek avoid_always (semua hari)
+        for avoid in self.avoid_always:
+            start = avoid["start"][0] * 60 + avoid["start"][1]
+            end   = avoid["end"][0]   * 60 + avoid["end"][1]
+            if start <= now_min <= end:
+                return {
+                    "should_avoid": True,
+                    "reason"      : avoid["reason"],
+                }
+
+        # Cek avoid per hari
         for avoid in self.avoid_times:
             if avoid["day"] != weekday:
                 continue
@@ -503,14 +604,19 @@ class SessionFilter:
         return {"should_avoid": False, "reason": None}
 
     def get_session_info(self) -> dict:
+        """Info lengkap session sekarang dalam WIB."""
         now_wib_dt, hour_wib, minute, _ = self._now_wib()
 
-        if 0 <= hour_wib < 7:
-            active = "Asia Session (Low Volume)"
+        if 0 <= hour_wib < 2:
+            active = "Late NY / Pre-Asia"
+        elif 2 <= hour_wib < 7:
+            active = "Asia Session (Low Volume — skip)"
         elif 7 <= hour_wib < 14:
             active = "Pre-London (Preparation)"
         elif hour_wib == 14 and minute >= 45:
             active = "Pre-London Buffer ⏳"
+        elif hour_wib == 15 and minute < self.LONDON_ENTRY_DELAY_MIN:
+            active = f"London Open Delay ⏳ ({self.LONDON_ENTRY_DELAY_MIN} mnt)"
         elif (hour_wib == 15 or hour_wib == 16 or
               (hour_wib == 17 and minute <= 30)):
             active = "London Killzone ⚡"
@@ -518,6 +624,9 @@ class SessionFilter:
             active = "London-NY Gap"
         elif hour_wib == 20 and minute < 30:
             active = "Pre-NY Buffer ⏳"
+        elif (hour_wib == 20 and
+              30 <= minute < 30 + self.NY_ENTRY_DELAY_MIN):
+            active = f"NY Open Delay ⏳ ({self.NY_ENTRY_DELAY_MIN} mnt)"
         elif ((hour_wib == 20 and minute >= 30) or
               21 <= hour_wib < 23):
             active = "New York Killzone ⚡"
@@ -527,13 +636,23 @@ class SessionFilter:
         killzone = self.is_killzone()
         avoid    = self.is_avoid_time()
 
+        # Tambah info delay ke should_avoid kalau sedang delay
+        in_delay     = killzone.get("in_delay", False)
+        should_avoid = avoid["should_avoid"]
+        avoid_reason = avoid.get("reason", "")
+
+        if in_delay and not should_avoid:
+            should_avoid = True
+            avoid_reason = killzone.get("delay_reason", "Killzone delay")
+
         return {
             "active_session": active,
             "in_killzone"   : killzone["in_killzone"],
             "session_name"  : killzone.get("session"),
             "is_pre_session": killzone.get("is_pre_session", False),
-            "should_avoid"  : avoid["should_avoid"],
-            "avoid_reason"  : avoid.get("reason"),
+            "in_delay"      : in_delay,
+            "should_avoid"  : should_avoid,
+            "avoid_reason"  : avoid_reason,
             "wib_time"      : f"{hour_wib:02d}:{minute:02d} WIB",
             "utc_time"      : datetime.now(UTC).strftime("%H:%M UTC"),
         }

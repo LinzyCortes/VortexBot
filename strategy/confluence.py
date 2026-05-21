@@ -2,7 +2,7 @@
 # VORTEX BOT - CONFLUENCE SCORING SYSTEM
 # ============================================
 #
-# Breakdown 23 poin:
+# Breakdown 24 poin:
 #
 #   TEKNIKAL (5)
 #     EMA align        : 1
@@ -15,7 +15,7 @@
 #     Pullback         : 1
 #
 #   SMC (7)
-#     BOS / CHoCH      : 2
+#     BOS/CHoCH fresh  : 2  (stale = 1 poin)
 #     Order Block      : 2
 #     FVG              : 1
 #     Liquidity swept  : 1
@@ -25,15 +25,16 @@
 #     Fib 0.618        : 2
 #     Fib 0.500        : 1
 #
-#   INSTITUTIONAL (3)
+#   INSTITUTIONAL (4)
 #     VWAP zone        : 2
 #     Funding rate     : 1
+#     BTC Correlation  : 1
 #
 #   FILTER (2)
 #     Killzone         : 1
 #     News clear       : 1
 #
-#   TOTAL              : 23
+#   TOTAL              : 24
 #
 # Phase guide (Railway Variables):
 #   Demo Phase 1 : MIN_CONFLUENCE_SCORE=11
@@ -58,7 +59,7 @@ class ConfluenceScorer:
             "breakout_ok"      : {"points": 2, "desc": "Breakout valid dengan volume"},
             "pullback_ok"      : {"points": 1, "desc": "Pullback ke zona support/resistance"},
             # SMC
-            "bos_confirmed"    : {"points": 2, "desc": "BOS/CHoCH terkonfirmasi"},
+            "bos_confirmed"    : {"points": 2, "desc": "BOS/CHoCH fresh terkonfirmasi"},
             "ob_valid"         : {"points": 2, "desc": "Order Block valid"},
             "fvg_detected"     : {"points": 1, "desc": "FVG terdeteksi"},
             "liquidity_swept"  : {"points": 1, "desc": "Liquidity sudah di-sweep"},
@@ -69,6 +70,7 @@ class ConfluenceScorer:
             # Institutional
             "vwap_ok"          : {"points": 2, "desc": "VWAP zone sesuai direction"},
             "funding_ok"       : {"points": 1, "desc": "Funding rate kondusif"},
+            "correlation_ok"   : {"points": 1, "desc": "BTC correlation searah"},
             # Filter
             "killzone_ok"      : {"points": 1, "desc": "Dalam Killzone session"},
             "news_clear"       : {"points": 1, "desc": "Tidak ada high-impact news"},
@@ -76,33 +78,33 @@ class ConfluenceScorer:
 
         self.max_score = sum(
             v["points"] for v in self.score_definitions.values()
-        )  # = 23
+        )  # = 24
 
     # ─── CALCULATE SCORE ────────────────────
 
     def calculate(self,
-                  direction     : str,
-                  indicators    : dict,
-                  smc_analysis  : dict,
-                  fib_analysis  : dict,
-                  session_info  : dict,
-                  news_status   : dict,
-                  breakout_info : dict = None,
-                  pullback_info : dict = None,
-                  vwap_result   : dict = None,
-                  funding_result: dict = None) -> dict:
-        """
-        Hitung confluence score 23 poin.
-        """
+                  direction          : str,
+                  indicators         : dict,
+                  smc_analysis       : dict,
+                  fib_analysis       : dict,
+                  session_info       : dict,
+                  news_status        : dict,
+                  breakout_info      : dict = None,
+                  pullback_info      : dict = None,
+                  vwap_result        : dict = None,
+                  funding_result     : dict = None,
+                  correlation_result : dict = None) -> dict:
+        """Hitung confluence score 24 poin."""
         try:
             score     = 0
             breakdown = {}
             reasons   = []
 
-            if breakout_info  is None: breakout_info  = {}
-            if pullback_info  is None: pullback_info  = {}
-            if vwap_result    is None: vwap_result    = {}
-            if funding_result is None: funding_result = {}
+            if breakout_info       is None: breakout_info       = {}
+            if pullback_info       is None: pullback_info       = {}
+            if vwap_result         is None: vwap_result         = {}
+            if funding_result      is None: funding_result      = {}
+            if correlation_result  is None: correlation_result  = {}
 
             # ══════════════════════════════════
             # TEKNIKAL
@@ -141,7 +143,7 @@ class ConfluenceScorer:
             )
 
             if stoch_signal:
-                pts = self.score_definitions["stoch_ok"]["points"]  # 2
+                pts = self.score_definitions["stoch_ok"]["points"]
                 score += pts
                 breakdown["stoch_ok"] = pts
                 zone = "oversold" if direction == "BUY" else "overbought"
@@ -240,23 +242,41 @@ class ConfluenceScorer:
             # SMC
             # ══════════════════════════════════
 
-            # 7. BOS / CHoCH (2 poin)
-            bos_4h   = smc_analysis.get("bos_4h",   False)
-            choch_4h = smc_analysis.get("choch_4h", False)
-            bos_1h   = smc_analysis.get("bos_1h",   False)
-            choch_1h = smc_analysis.get("choch_1h", False)
-            bos_ok   = bos_4h or choch_4h or bos_1h or choch_1h
+            # 7. BOS / CHoCH (2 poin fresh, 1 poin stale)
+            bos_4h         = smc_analysis.get("bos_4h",         False)
+            choch_4h       = smc_analysis.get("choch_4h",       False)
+            bos_1h         = smc_analysis.get("bos_1h",         False)
+            choch_1h       = smc_analysis.get("choch_1h",       False)
+            bos_4h_fresh   = smc_analysis.get("bos_4h_fresh",   False)
+            choch_4h_fresh = smc_analysis.get("choch_4h_fresh", False)
+            bos_1h_fresh   = smc_analysis.get("bos_1h_fresh",   False)
+            choch_1h_fresh = smc_analysis.get("choch_1h_fresh", False)
 
-            if bos_ok:
+            bos_ok    = bos_4h or choch_4h or bos_1h or choch_1h
+            bos_fresh = (
+                bos_4h_fresh or choch_4h_fresh or
+                bos_1h_fresh or choch_1h_fresh
+            )
+
+            if bos_ok and bos_fresh:
+                # BOS fresh → full 2 poin
                 pts = self.score_definitions["bos_confirmed"]["points"]
                 score += pts
                 breakdown["bos_confirmed"] = pts
                 bos_type = (
-                    "BOS 4H"   if bos_4h   else
-                    "CHoCH 4H" if choch_4h else
-                    "BOS 1H"   if bos_1h   else "CHoCH 1H"
+                    "BOS 4H"   if (bos_4h and bos_4h_fresh)    else
+                    "CHoCH 4H" if (choch_4h and choch_4h_fresh) else
+                    "BOS 1H"   if (bos_1h and bos_1h_fresh)     else
+                    "CHoCH 1H"
                 )
-                reasons.append(f"✅ {bos_type} terkonfirmasi")
+                reasons.append(f"✅ {bos_type} FRESH terkonfirmasi")
+            elif bos_ok and not bos_fresh:
+                # BOS stale → 1 poin
+                score += 1
+                breakdown["bos_confirmed"] = 1
+                reasons.append(
+                    "⚠️ BOS/CHoCH stale (>10 candle) — 1 poin"
+                )
             else:
                 breakdown["bos_confirmed"] = 0
                 reasons.append("❌ BOS/CHoCH tidak terkonfirmasi")
@@ -347,7 +367,7 @@ class ConfluenceScorer:
                 )
 
             # ══════════════════════════════════
-            # INSTITUTIONAL FILTERS
+            # INSTITUTIONAL
             # ══════════════════════════════════
 
             # 14. VWAP Zone (maks 2 poin)
@@ -371,7 +391,7 @@ class ConfluenceScorer:
                 else:
                     reasons.append("❌ VWAP zone tidak ideal")
 
-            # 15. Funding Rate (maks 1 poin)
+            # 15. Funding Rate (1 poin)
             fund_bonus  = funding_result.get("score_bonus", 0)
             fund_pass   = funding_result.get("pass", True)
             fund_reason = funding_result.get("reason", "")
@@ -392,11 +412,36 @@ class ConfluenceScorer:
                     f"❌ Funding rate tidak kondusif ({fund_rate:+.4f}%)"
                 )
 
+            # 16. BTC Correlation (1 poin)
+            corr_bonus  = correlation_result.get("score_bonus", 0)
+            corr_pass   = correlation_result.get("pass", True)
+            corr_reason = correlation_result.get("reason", "")
+            corr_btc    = correlation_result.get("btc_trend", "N/A")
+            is_btc_pair = correlation_result.get("is_btc_pair", False)
+
+            if is_btc_pair:
+                # BTC pair tidak perlu cek correlation diri sendiri
+                breakdown["correlation_ok"] = 0
+            elif corr_bonus >= 1:
+                pts = self.score_definitions["correlation_ok"]["points"]
+                score += pts
+                breakdown["correlation_ok"] = pts
+                reasons.append(
+                    corr_reason or
+                    f"✅ BTC correlation mendukung ({corr_btc})"
+                )
+            else:
+                breakdown["correlation_ok"] = 0
+                reasons.append(
+                    corr_reason or
+                    f"⚠️ BTC correlation neutral ({corr_btc})"
+                )
+
             # ══════════════════════════════════
             # FILTER
             # ══════════════════════════════════
 
-            # 16. Killzone (1 poin)
+            # 17. Killzone (1 poin)
             in_kz        = session_info.get("in_killzone", False)
             session_name = session_info.get("session_name", "")
             avoid        = session_info.get("should_avoid", False)
@@ -422,7 +467,7 @@ class ConfluenceScorer:
                         f"next: {next_s.get('name', 'N/A')}"
                     )
 
-            # 17. News Clear (1 poin)
+            # 18. News Clear (1 poin)
             is_safe   = news_status.get("is_safe", True)
             news_list = news_status.get("unsafe_news", [])
             if is_safe:
@@ -439,11 +484,9 @@ class ConfluenceScorer:
 
             # ══════════════════════════════════
             # HARD BLOCK CHECK
-            # Kalau VWAP atau funding rate FAIL (bukan sekedar 0 poin)
-            # → paksa score di bawah threshold
             # ══════════════════════════════════
 
-            vwap_hard_fail    = (
+            vwap_hard_fail = (
                 vwap_result.get("valid", False) and
                 not vwap_pass and
                 cfg.VWAP_ENABLED
@@ -453,8 +496,16 @@ class ConfluenceScorer:
                 not fund_pass and
                 cfg.FUNDING_RATE_ENABLED
             )
+            correlation_hard_fail = (
+                not corr_pass and
+                not is_btc_pair
+            )
 
-            hard_fail = vwap_hard_fail or funding_hard_fail
+            hard_fail = (
+                vwap_hard_fail or
+                funding_hard_fail or
+                correlation_hard_fail
+            )
 
             # ══════════════════════════════════
             # FINAL SCORE
@@ -470,6 +521,8 @@ class ConfluenceScorer:
                     fail_reason.append("VWAP zone salah")
                 if funding_hard_fail:
                     fail_reason.append("Funding rate ekstrem")
+                if correlation_hard_fail:
+                    fail_reason.append("BTC correlation berlawanan")
                 reasons.append(
                     f"🚫 HARD BLOCK: {' + '.join(fail_reason)}"
                 )
@@ -491,6 +544,9 @@ class ConfluenceScorer:
                 "pullback_mode" : pullback_info.get("valid", False),
                 "vwap_zone"     : vwap_result.get("zone"),
                 "funding_rate"  : funding_result.get("rate", 0.0),
+                "btc_trend"     : corr_btc,
+                "corr_pass"     : corr_pass,
+                "bos_fresh"     : bos_fresh,
             }
 
             status = "✅ VALID" if is_valid else "❌ INVALID"
@@ -519,12 +575,12 @@ class ConfluenceScorer:
 
     @staticmethod
     def _get_grade(score: int) -> str:
-        """Grade berbasis max 23 poin"""
-        if score >= 20:
+        """Grade berbasis max 24 poin"""
+        if score >= 21:
             return "A+ (Perfect Setup)"
-        elif score >= 17:
+        elif score >= 18:
             return "A  (Excellent)"
-        elif score >= 14:
+        elif score >= 15:
             return "B+ (Good)"
         elif score >= 11:
             return "B  (Average)"
@@ -537,7 +593,7 @@ class ConfluenceScorer:
 
     def get_summary(self, result: dict) -> str:
         score     = result.get("score", 0)
-        max_score = result.get("max_score", 23)
+        max_score = result.get("max_score", 24)
         grade     = result.get("grade", "F")
         direction = result.get("direction", "")
         is_valid  = result.get("is_valid", False)
@@ -558,8 +614,10 @@ class ConfluenceScorer:
             mode_tags.append("PULLBACK")
         mode_str = " | ".join(mode_tags) if mode_tags else "SMC"
 
-        vwap_zone    = result.get("vwap_zone", "")
-        funding_rate = result.get("funding_rate", 0.0)
+        vwap_zone  = result.get("vwap_zone", "")
+        fund_rate  = result.get("funding_rate", 0.0)
+        btc_trend  = result.get("btc_trend", "")
+        bos_fresh  = result.get("bos_fresh", False)
 
         lines = [
             f"\n{'='*45}",
@@ -568,7 +626,9 @@ class ConfluenceScorer:
             f"Mode     : {mode_str}",
             f"Direction: {direction}",
             f"VWAP     : {vwap_zone or 'N/A'}",
-            f"Funding  : {funding_rate:+.4f}%",
+            f"Funding  : {fund_rate:+.4f}%",
+            f"BTC      : {btc_trend or 'N/A'}",
+            f"BOS Fresh: {'✅' if bos_fresh else '❌'}",
             f"Status   : {status}",
             f"{'='*45}",
             "\n📋 DETAIL SCORE:",

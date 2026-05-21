@@ -2,26 +2,76 @@
 # VORTEX BOT - VWAP ANALYSIS
 # ============================================
 #
-# VWAP (Volume Weighted Average Price) adalah
-# benchmark utama yang dipakai institusi besar.
-#
-# Logika institusi:
-#   - Harga di BAWAH VWAP = discount zone → ideal BUY
-#   - Harga di ATAS  VWAP = premium zone  → ideal SELL
-#   - Entry melawan VWAP  = counter-institutional → skip
-#
-# Tambahan: VWAP bands (±1 std dev) untuk deteksi
-# overextended price → potensi mean reversion ke VWAP.
-#
-# Data: OHLCV 1H dari exchange (gratis, API publik).
+# FIX v1.3:
+#   - Session-aware tolerance
+#     NY session (13:30-16:00 UTC) pakai tolerance
+#     lebih lebar (1.0%) karena harga sudah bergerak
+#     jauh dari VWAP harian setelah London session.
+#     Sebelumnya tolerance flat 0.3% → bot tidak pernah
+#     entry di NY karena price terlihat "overextended"
+#     padahal itu trend valid.
+#   - Tambah per-session VWAP (London & NY terpisah)
+#     sebagai referensi tambahan selain daily VWAP.
+#   - Hard block hanya untuk overextended BERLAWANAN
+#     arah, bukan sekedar "di atas/bawah VWAP".
 
 import pandas as pd
 import numpy as np
+from datetime import datetime, timezone, timedelta
 from config import cfg
 from logger import logger
 
+UTC = timezone.utc
+WIB = timezone(timedelta(hours=7))
+
 
 class VWAPAnalysis:
+
+    # ─── SESSION HELPERS ────────────────────
+
+    @staticmethod
+    def _get_current_session() -> str:
+        """
+        Tentukan session aktif berdasarkan jam UTC.
+        London : 08:00–11:30 UTC (15:00–18:30 WIB)
+        NY     : 13:30–16:00 UTC (20:30–23:00 WIB)
+        """
+        now_utc = datetime.now(UTC)
+        h = now_utc.hour
+        m = now_utc.minute
+        t = h * 60 + m
+
+        london_open  = 8  * 60
+        london_close = 11 * 60 + 30
+        ny_open      = 13 * 60 + 30
+        ny_close     = 16 * 60
+
+        if london_open <= t <= london_close:
+            return "london"
+        elif ny_open <= t <= ny_close:
+            return "new_york"
+        else:
+            return "off_session"
+
+    @staticmethod
+    def _get_tolerance_for_session(session: str) -> float:
+        """
+        Tolerance VWAP per session.
+
+        FIX: NY session pakai tolerance lebih lebar
+        karena harga sudah bergerak ~1-2% dari VWAP
+        setelah London session duluan jalan.
+
+        London     : 0.5% — market baru buka, VWAP masih fresh
+        NY         : 1.0% — VWAP sudah terbentuk 13+ jam
+        Off-session: 0.3% — pakai cfg default (ketat)
+        """
+        if session == "london":
+            return 0.5
+        elif session == "new_york":
+            return 1.0
+        else:
+            return cfg.VWAP_TOLERANCE_PCT  # default 0.3
 
     # ─── CALCULATE VWAP ─────────────────────
 
@@ -47,10 +97,7 @@ class VWAPAnalysis:
     def calculate_vwap_bands(df: pd.DataFrame,
                              vwap: pd.Series,
                              num_std: float = 1.0) -> dict:
-        """
-        VWAP bands ±1 std dev.
-        Dipakai untuk deteksi overextended price.
-        """
+        """VWAP bands ±1 std dev untuk deteksi overextended."""
         try:
             typical_price = (
                 df["high"] + df["low"] + df["close"]
@@ -78,16 +125,17 @@ class VWAPAnalysis:
         """
         Hitung VWAP harian dari data 1H.
         Reset tiap 00:00 UTC — standar institusi.
+
+        FIX: Tolerance sekarang dinamis per session,
+        bukan flat 0.3% untuk semua waktu.
         """
         try:
             if df_1h.empty or len(df_1h) < 2:
                 return {"valid": False}
 
-            # Ambil candle hari ini (UTC)
-            now_utc  = pd.Timestamp.now(tz="UTC")
-            today    = now_utc.normalize()
+            now_utc = pd.Timestamp.now(tz="UTC")
+            today   = now_utc.normalize()
 
-            # Index mungkin timezone-aware atau naive
             idx = df_1h.index
             if idx.tz is not None:
                 df_today = df_1h[idx >= today]
@@ -95,7 +143,6 @@ class VWAPAnalysis:
                 today_naive = today.tz_localize(None)
                 df_today    = df_1h[idx >= today_naive]
 
-            # Fallback: pakai 24 candle terakhir
             if len(df_today) < 2:
                 df_today = df_1h.tail(24)
 
@@ -110,9 +157,9 @@ class VWAPAnalysis:
             current_vwap  = float(vwap_series.iloc[-1])
             current_price = float(df_today["close"].iloc[-1])
 
-            upper  = float(bands["upper"].iloc[-1]) if bands else 0
-            lower  = float(bands["lower"].iloc[-1]) if bands else 0
-            std    = float(bands["std"].iloc[-1])   if bands else 0
+            upper = float(bands["upper"].iloc[-1]) if bands else 0
+            lower = float(bands["lower"].iloc[-1]) if bands else 0
+            std   = float(bands["std"].iloc[-1])   if bands else 0
 
             diff_pct = (
                 (current_price - current_vwap) /
@@ -127,13 +174,16 @@ class VWAPAnalysis:
                 current_price < lower
             ) if (upper > 0 and lower > 0) else False
 
-            tolerance = cfg.VWAP_TOLERANCE_PCT
+            # FIX: tolerance dinamis per session
+            session   = self._get_current_session()
+            tolerance = self._get_tolerance_for_session(session)
             near_vwap = abs(diff_pct) <= tolerance
 
             logger.debug(
-                f"📊 VWAP: ${current_vwap:.2f} | "
+                f"📊 VWAP daily: ${current_vwap:.2f} | "
                 f"price={current_price:.2f} | "
                 f"zone={zone} | diff={diff_pct:+.2f}% | "
+                f"session={session} | tol={tolerance}% | "
                 f"overext={overextended}"
             )
 
@@ -149,11 +199,74 @@ class VWAPAnalysis:
                 "diff_pct"     : diff_pct,
                 "near_vwap"    : near_vwap,
                 "overextended" : overextended,
+                "session"      : session,
+                "tolerance_pct": tolerance,
                 "candles_used" : len(df_today),
             }
 
         except Exception as e:
             logger.error(f"❌ Daily VWAP error: {e}")
+            return {"valid": False}
+
+    # ─── SESSION VWAP ───────────────────────
+
+    def get_session_vwap(self, df_1h: pd.DataFrame,
+                         session: str) -> dict:
+        """
+        Hitung VWAP per-session (London atau NY).
+        Reset di awal setiap session — lebih akurat
+        untuk entry di pertengahan/akhir session.
+
+        London start : 08:00 UTC
+        NY start     : 13:30 UTC
+        """
+        try:
+            if df_1h.empty:
+                return {"valid": False}
+
+            now_utc = pd.Timestamp.now(tz="UTC")
+
+            if session == "london":
+                session_start = now_utc.normalize() + pd.Timedelta(hours=8)
+            elif session == "new_york":
+                session_start = (
+                    now_utc.normalize() +
+                    pd.Timedelta(hours=13, minutes=30)
+                )
+            else:
+                return {"valid": False}
+
+            idx = df_1h.index
+            if idx.tz is not None:
+                df_sess = df_1h[idx >= session_start]
+            else:
+                start_naive = session_start.tz_localize(None)
+                df_sess     = df_1h[idx >= start_naive]
+
+            if len(df_sess) < 1:
+                return {"valid": False}
+
+            vwap_series   = self.calculate_vwap(df_sess)
+            session_vwap  = float(vwap_series.iloc[-1])
+            current_price = float(df_sess["close"].iloc[-1])
+
+            diff_pct = (
+                (current_price - session_vwap) /
+                session_vwap * 100
+            )
+            side = "above" if current_price > session_vwap else "below"
+
+            return {
+                "valid"        : True,
+                "session"      : session,
+                "vwap"         : session_vwap,
+                "side"         : side,
+                "diff_pct"     : diff_pct,
+                "candles_used" : len(df_sess),
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Session VWAP error: {e}")
             return {"valid": False}
 
     # ─── VWAP FILTER ────────────────────────
@@ -164,11 +277,19 @@ class VWAPAnalysis:
         """
         Filter entry berdasarkan posisi harga vs VWAP.
 
+        FIX v1.3: Hard block HANYA untuk kondisi:
+          - BUY  + overextended di atas VWAP
+          - SELL + overextended di bawah VWAP
+          - DAN sudah jauh > 2x tolerance dari VWAP
+
+        Sebelumnya hard block terlalu mudah trigger
+        karena tolerance flat → NY session selalu blocked.
+
         Score bonus:
-          +2 → harga di zona yang benar & tidak overextended
-          +1 → harga near VWAP (dalam tolerance)
-           0 → harga di zona yang salah (tetap pass tapi no bonus)
-          FAIL → overextended ke arah yang salah
+          +2 → zona ideal + tidak overextended
+          +1 → near VWAP (dalam tolerance session)
+           0 → zona kurang ideal tapi tidak hard block
+        FAIL → overextended berlawanan arah (benar-benar counter)
         """
         try:
             if not vwap_data.get("valid"):
@@ -187,6 +308,9 @@ class VWAPAnalysis:
             overextended = vwap_data.get("overextended", False)
             diff_pct     = vwap_data.get("diff_pct", 0)
             vwap_val     = vwap_data.get("vwap", 0)
+            session      = vwap_data.get("session", "off_session")
+            tolerance    = vwap_data.get("tolerance_pct",
+                                         cfg.VWAP_TOLERANCE_PCT)
 
             base = {
                 "side"      : side,
@@ -194,32 +318,46 @@ class VWAPAnalysis:
                 "diff_pct"  : diff_pct,
                 "vwap_value": vwap_val,
                 "near_vwap" : near_vwap,
+                "session"   : session,
             }
+
+            # Hard block threshold = 2x tolerance
+            # (lebih ketat dari sekedar overextended)
+            hard_block_threshold = tolerance * 2
 
             if direction == "BUY":
                 if side == "below" and not overextended:
+                    # Ideal: discount zone, tidak overextended
                     return {**base, "pass": True, "score_bonus": 2,
                             "reason": (
                                 f"✅ VWAP: DISCOUNT zone "
                                 f"({diff_pct:+.2f}%) — ideal BUY"
                             )}
                 elif near_vwap:
+                    # Near VWAP dalam tolerance session
                     return {**base, "pass": True, "score_bonus": 1,
                             "reason": (
                                 f"⚠️ VWAP: near VWAP "
-                                f"({diff_pct:+.2f}%) — acceptable"
+                                f"({diff_pct:+.2f}%) [{session}] "
+                                f"— acceptable"
                             )}
-                elif side == "above" and overextended:
+                elif (side == "above" and
+                      abs(diff_pct) > hard_block_threshold and
+                      overextended):
+                    # Hard block: BUY sudah sangat jauh di atas VWAP
                     return {**base, "pass": False, "score_bonus": 0,
                             "reason": (
-                                f"❌ VWAP: BUY di PREMIUM overextended "
-                                f"({diff_pct:+.2f}%) — skip"
+                                f"❌ VWAP: BUY overextended "
+                                f"({diff_pct:+.2f}% > "
+                                f"{hard_block_threshold:.1f}%) — skip"
                             )}
                 else:
+                    # Di atas VWAP tapi tidak ekstrem → warning, tetap pass
                     return {**base, "pass": True, "score_bonus": 0,
                             "reason": (
-                                f"⚠️ VWAP: BUY di atas VWAP "
-                                f"({diff_pct:+.2f}%) — tidak ideal"
+                                f"⚠️ VWAP: BUY di PREMIUM "
+                                f"({diff_pct:+.2f}%) [{session}] "
+                                f"— tidak ideal tapi boleh"
                             )}
 
             elif direction == "SELL":
@@ -233,19 +371,24 @@ class VWAPAnalysis:
                     return {**base, "pass": True, "score_bonus": 1,
                             "reason": (
                                 f"⚠️ VWAP: near VWAP "
-                                f"({diff_pct:+.2f}%) — acceptable"
+                                f"({diff_pct:+.2f}%) [{session}] "
+                                f"— acceptable"
                             )}
-                elif side == "below" and overextended:
+                elif (side == "below" and
+                      abs(diff_pct) > hard_block_threshold and
+                      overextended):
                     return {**base, "pass": False, "score_bonus": 0,
                             "reason": (
-                                f"❌ VWAP: SELL di DISCOUNT overextended "
-                                f"({diff_pct:+.2f}%) — skip"
+                                f"❌ VWAP: SELL overextended bawah "
+                                f"({diff_pct:+.2f}% > "
+                                f"{hard_block_threshold:.1f}%) — skip"
                             )}
                 else:
                     return {**base, "pass": True, "score_bonus": 0,
                             "reason": (
-                                f"⚠️ VWAP: SELL di bawah VWAP "
-                                f"({diff_pct:+.2f}%) — tidak ideal"
+                                f"⚠️ VWAP: SELL di DISCOUNT "
+                                f"({diff_pct:+.2f}%) [{session}] "
+                                f"— tidak ideal tapi boleh"
                             )}
 
             return {**base, "pass": True, "score_bonus": 0,
@@ -265,10 +408,7 @@ class VWAPAnalysis:
                                df: pd.DataFrame,
                                vwap_data: dict) -> dict:
         """
-        Deteksi peluang mean reversion ke VWAP.
-
-        Institusi sering entry saat harga overextended
-        dan volume mulai exhausted → harga balik ke VWAP.
+        Deteksi mean reversion ke VWAP.
         Kondisi: overextended + volume exhaustion.
         """
         try:
@@ -315,61 +455,88 @@ class VWAPAnalysis:
     def analyze(self, df_1h: pd.DataFrame,
                 direction: str) -> dict:
         """
-        Full VWAP analysis.
-        Dipanggil dari main.py setelah data 1H tersedia.
+        Full VWAP analysis dengan session-aware tolerance.
 
         Return dict:
-          valid        → apakah VWAP berhasil dihitung
-          pass         → apakah signal boleh lanjut
-          score_bonus  → poin bonus untuk confluence (0/1/2)
-          vwap         → nilai VWAP saat ini
-          side         → "above" / "below"
-          zone         → "PREMIUM" / "DISCOUNT"
-          diff_pct     → jarak harga dari VWAP dalam %
-          reason       → teks penjelasan untuk log/notif
+          valid        → VWAP berhasil dihitung
+          pass         → signal boleh lanjut
+          score_bonus  → 0 / 1 / 2
+          vwap         → nilai VWAP harian
+          side         → above / below
+          zone         → PREMIUM / DISCOUNT
+          diff_pct     → jarak dari VWAP dalam %
+          session      → london / new_york / off_session
+          tolerance_pct → tolerance yang dipakai
+          reason       → teks untuk log/notif
         """
         try:
             if not cfg.VWAP_ENABLED:
                 return {
-                    "valid"      : False,
-                    "pass"       : True,
-                    "score_bonus": 0,
-                    "reason"     : "VWAP filter disabled",
-                    "vwap"       : None,
-                    "side"       : None,
-                    "zone"       : None,
+                    "valid"        : False,
+                    "pass"         : True,
+                    "score_bonus"  : 0,
+                    "reason"       : "VWAP filter disabled",
+                    "vwap"         : None,
+                    "side"         : None,
+                    "zone"         : None,
+                    "session"      : None,
+                    "tolerance_pct": cfg.VWAP_TOLERANCE_PCT,
                 }
 
+            # Daily VWAP
             vwap_data  = self.get_daily_vwap(df_1h)
             filter_res = self.check_vwap_filter(direction, vwap_data)
             reversion  = self.detect_vwap_reversion(df_1h, vwap_data)
 
-            return {
-                "valid"        : vwap_data.get("valid", False),
-                "vwap"         : vwap_data.get("vwap"),
-                "upper_band"   : vwap_data.get("upper_band"),
-                "lower_band"   : vwap_data.get("lower_band"),
-                "side"         : vwap_data.get("side"),
-                "zone"         : vwap_data.get("zone"),
-                "diff_pct"     : vwap_data.get("diff_pct", 0),
-                "near_vwap"    : vwap_data.get("near_vwap", False),
-                "overextended" : vwap_data.get("overextended", False),
-                "pass"         : filter_res.get("pass", True),
-                "reason"       : filter_res.get("reason", ""),
-                "score_bonus"  : filter_res.get("score_bonus", 0),
-                "reversion"    : reversion,
+            # Session VWAP (sebagai info tambahan, tidak block)
+            session     = vwap_data.get("session", "off_session")
+            session_vwap = {}
+            if session in ("london", "new_york"):
+                session_vwap = self.get_session_vwap(df_1h, session)
+
+            result = {
+                "valid"         : vwap_data.get("valid", False),
+                "vwap"          : vwap_data.get("vwap"),
+                "upper_band"    : vwap_data.get("upper_band"),
+                "lower_band"    : vwap_data.get("lower_band"),
+                "side"          : vwap_data.get("side"),
+                "zone"          : vwap_data.get("zone"),
+                "diff_pct"      : vwap_data.get("diff_pct", 0),
+                "near_vwap"     : vwap_data.get("near_vwap", False),
+                "overextended"  : vwap_data.get("overextended", False),
+                "session"       : session,
+                "tolerance_pct" : vwap_data.get(
+                    "tolerance_pct", cfg.VWAP_TOLERANCE_PCT
+                ),
+                "pass"          : filter_res.get("pass", True),
+                "reason"        : filter_res.get("reason", ""),
+                "score_bonus"   : filter_res.get("score_bonus", 0),
+                "reversion"     : reversion,
+                "session_vwap"  : session_vwap,
             }
+
+            logger.debug(
+                f"📊 VWAP analyze: "
+                f"session={session} | "
+                f"tol={result['tolerance_pct']}% | "
+                f"pass={result['pass']} | "
+                f"bonus={result['score_bonus']}"
+            )
+
+            return result
 
         except Exception as e:
             logger.error(f"❌ VWAP analyze error: {e}")
             return {
-                "valid"      : False,
-                "pass"       : True,
-                "score_bonus": 0,
-                "reason"     : f"VWAP error — bypassed: {e}",
-                "vwap"       : None,
-                "side"       : None,
-                "zone"       : None,
+                "valid"        : False,
+                "pass"         : True,
+                "score_bonus"  : 0,
+                "reason"       : f"VWAP error — bypassed: {e}",
+                "vwap"         : None,
+                "side"         : None,
+                "zone"         : None,
+                "session"      : None,
+                "tolerance_pct": cfg.VWAP_TOLERANCE_PCT,
             }
 
 

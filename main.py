@@ -1,5 +1,5 @@
 # ============================================
-# VORTEX BOT v1.2 - MAIN ENGINE
+# VORTEX BOT v1.3 - MAIN ENGINE
 # Institutional Grade Trading Bot
 # ============================================
 
@@ -18,6 +18,7 @@ from strategy.confluence import confluence_scorer
 from strategy.breakout_pullback import breakout_pullback
 from strategy.vwap import vwap_analyzer
 from strategy.funding_rate import funding_filter
+from strategy.correlation import correlation_filter
 from risk.management import risk_manager
 from notification.telegram import telegram
 from learning.evaluator import evaluator
@@ -63,7 +64,7 @@ class VortexBot:
 
     def __init__(self):
         self.name        = "VΦrtex Bot"
-        self.version     = "1.2"
+        self.version     = "1.3"
         self.running     = False
         self.start_time  = None
         self.pairs       = cfg.PAIRS
@@ -72,12 +73,18 @@ class VortexBot:
         self._news_block_notified = False
         self._news_block_key      = None
 
+        # Anti-spam cooldown untuk filter notif
+        # Format: {"BTC-USDT-SWAP": timestamp_terakhir_notif}
+        # Notif hanya kirim 1x per 30 menit per pair
+        self._vwap_skip_notified = {}
+        self._corr_skip_notified = {}
+
         logger.info(
             f"\n{'='*45}\n"
             f"  {self.name} v{self.version}\n"
             f"  Institutional Grade Trading Bot\n"
             f"  SMC + Fibonacci + BP + VWAP + Funding\n"
-            f"  Stochastic (5,3,3) | ATR 2.0x SL\n"
+            f"  Correlation + Regime + BOS Freshness\n"
             f"  Exchange: {EXCHANGE_NAME}\n"
             f"{'='*45}"
         )
@@ -88,7 +95,7 @@ class VortexBot:
 
     def startup(self) -> bool:
         logger.info(
-            f"🚀 Starting VΦrtex Bot v{self.version} "
+            f"🚀 Starting {self.name} v{self.version} "
             f"on {EXCHANGE_NAME}...\n"
             f"   WIB : {wib_str()} | UTC : {utc_str()}"
         )
@@ -114,9 +121,7 @@ class VortexBot:
             vb = risk_manager.get_virtual_balance()
             from exchange.okx import okx as _okx
             _okx._virtual_balance = vb
-            logger.info(
-                f"💰 Virtual balance synced: ${vb:.4f}"
-            )
+            logger.info(f"💰 Virtual balance synced: ${vb:.4f}")
 
         tg_ok = telegram.test_connection()
         if not tg_ok:
@@ -134,16 +139,18 @@ class VortexBot:
 
         cap_mode = cfg.get_capital_mode(balance)
         logger.info(
-            f"✅ VΦrtex Bot v{self.version} started!\n"
+            f"✅ {self.name} v{self.version} started!\n"
             f"   Exchange : {EXCHANGE_NAME}\n"
             f"   Balance  : ${balance:.4f}\n"
             f"   Mode     : {cap_mode['mode']}\n"
             f"   Pairs    : {', '.join(self.pairs)}\n"
-            f"   Strategy : SMC + Stoch(5,3,3) + BP + VWAP + Funding\n"
-            f"   SL Mode  : 2.0x ATR Dynamic\n"
-            f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/23\n"
+            f"   Strategy : SMC+Stoch+BP+VWAP+Funding+Corr\n"
+            f"   SL       : 2.0x ATR Dynamic\n"
+            f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/24\n"
             f"   VWAP     : {'ON' if cfg.VWAP_ENABLED else 'OFF'}\n"
             f"   Funding  : {'ON' if cfg.FUNDING_RATE_ENABLED else 'OFF'}\n"
+            f"   Regime   : {'ON' if cfg.REGIME_ENABLED else 'OFF'}\n"
+            f"   London delay : 15 mnt | NY delay : 5 mnt\n"
             f"   Time WIB : {wib_str()}\n"
             f"   Time UTC : {utc_str()}"
         )
@@ -216,30 +223,40 @@ class VortexBot:
                          bp_result: dict,
                          vwap_result: dict,
                          funding_result: dict,
-                         score: int) -> str:
+                         corr_result: dict,
+                         score: int,
+                         effective_min: int) -> str:
         try:
-            ema_ok = "✅" if ind.get("ema_bullish") is not None else "❌"
-
-            stoch_k   = ind.get("stoch_k", 50)
-            stoch_d   = ind.get("stoch_d", 50)
-            stoch_ok  = (
+            ema_ok   = "✅" if ind.get("ema_bullish") is not None else "❌"
+            stoch_k  = ind.get("stoch_k", 50)
+            stoch_d  = ind.get("stoch_d", 50)
+            stoch_ok = (
                 "✅" if (
                     ind.get("stoch_bullish") or
                     ind.get("stoch_bearish")
-                )
-                else "⚠️" if (
+                ) else "⚠️" if (
                     ind.get("stoch_soft_bull") or
                     ind.get("stoch_soft_bear")
-                )
-                else "❌"
+                ) else "❌"
             )
-
             vol_ok = "✅" if ind.get("volume_above_avg") else "❌"
 
-            bos_ok = "✅" if (
+            # BOS dengan freshness indicator
+            bos_exists = (
                 smc_result.get("bos_4h") or
                 smc_result.get("bos_1h")
-            ) else "❌"
+            )
+            bos_fresh = (
+                smc_result.get("bos_4h_fresh") or
+                smc_result.get("bos_1h_fresh") or
+                smc_result.get("choch_4h_fresh") or
+                smc_result.get("choch_1h_fresh")
+            )
+            bos_ok = (
+                ("✅🔥" if bos_fresh else "✅⏳")
+                if bos_exists else "❌"
+            )
+
             ob_ok  = "✅" if smc_result.get("in_ob")  else "❌"
             fvg_ok = "✅" if smc_result.get("in_fvg") else "❌"
 
@@ -251,6 +268,7 @@ class VortexBot:
             }.get(bp_result.get("mode", "NONE"), "—")
 
             vwap_zone = vwap_result.get("zone", "?")
+            vwap_sess = vwap_result.get("session", "?")
             vwap_ok   = (
                 "✅" if vwap_result.get("score_bonus", 0) >= 2 else
                 "⚠️" if vwap_result.get("score_bonus", 0) == 1 else
@@ -263,6 +281,14 @@ class VortexBot:
                 else "❌"
             )
 
+            corr_trend  = corr_result.get("btc_trend", "?")
+            corr_pass   = corr_result.get("pass", True)
+            is_btc_pair = corr_result.get("is_btc_pair", False)
+            corr_ok     = (
+                "—"  if is_btc_pair else
+                "✅" if corr_pass   else "❌"
+            )
+
             return (
                 f"{pair} | "
                 f"EMA{ema_ok} "
@@ -270,9 +296,10 @@ class VortexBot:
                 f"Vol{vol_ok} | "
                 f"BOS{bos_ok} OB{ob_ok} FVG{fvg_ok} | "
                 f"BP:{mode_tag} | "
-                f"VWAP{vwap_ok}({vwap_zone}) "
-                f"Fund{fund_ok}({fund_rate:+.3f}%) | "
-                f"Score:{score}/23"
+                f"VWAP{vwap_ok}({vwap_zone}/{vwap_sess}) "
+                f"Fund{fund_ok}({fund_rate:+.3f}%) "
+                f"Corr{corr_ok}({corr_trend}) | "
+                f"Score:{score}/{effective_min}"
             )
 
         except Exception as e:
@@ -283,7 +310,7 @@ class VortexBot:
     # ═════════════════════════════════════════════════════════════════════════
 
     def analyze_pair(self, pair: str) -> dict:
-        """Full analysis untuk 1 pair — 9 steps"""
+        """Full analysis untuk 1 pair — 10 steps"""
         try:
             logger.info(f"🔍 Analyzing {pair}...")
 
@@ -291,20 +318,24 @@ class VortexBot:
             session_info = session_filter.get_session_info()
 
             if session_info.get("should_avoid"):
-                logger.info(
-                    f"⏭️ Skip {pair}: "
-                    f"{session_info.get('avoid_reason')}"
-                )
+                reason = session_info.get("avoid_reason", "")
+                logger.info(f"⏭️ Skip {pair}: {reason}")
                 return {}
 
             killzone = session_filter.is_killzone()
             if not killzone.get("in_killzone"):
-                next_s = killzone.get("next_session", {})
-                logger.info(
-                    f"⏭️ {pair}: Outside killzone | "
-                    f"Next: {next_s.get('name', 'N/A')} "
-                    f"in {next_s.get('minutes_away', '?')} min"
-                )
+                # Bedakan delay vs benar-benar di luar killzone
+                if killzone.get("in_delay"):
+                    logger.info(
+                        f"⏳ {pair}: {killzone.get('delay_reason')}"
+                    )
+                else:
+                    next_s = killzone.get("next_session", {})
+                    logger.info(
+                        f"⏭️ {pair}: Outside killzone | "
+                        f"Next: {next_s.get('name', 'N/A')} "
+                        f"in {next_s.get('minutes_away', '?')} min"
+                    )
                 return {}
 
             news_blocked = self._check_and_notify_news_block()
@@ -407,12 +438,15 @@ class VortexBot:
             vwap_result = vwap_analyzer.analyze(df_1h, direction)
 
             if not vwap_result.get("pass", True):
-                # VWAP hard block → skip pair, kirim notif
                 logger.info(
-                    f"⏭️ {pair}: VWAP filter block — "
+                    f"⏭️ {pair}: VWAP block — "
                     f"{vwap_result.get('reason')}"
                 )
-                if vwap_result.get("valid"):
+                # Anti-spam: notif hanya 1x per 30 menit per pair
+                now_ts     = time.time()
+                last_notif = self._vwap_skip_notified.get(pair, 0)
+                if (vwap_result.get("valid") and
+                        now_ts - last_notif > 1800):
                     telegram.send_vwap_filter_skip(
                         pair      =pair,
                         direction =direction,
@@ -420,15 +454,15 @@ class VortexBot:
                         price     =current_price,
                         vwap      =vwap_result.get("vwap", 0),
                     )
+                    self._vwap_skip_notified[pair] = now_ts
                 return {}
 
             # ── STEP 8: FUNDING RATE ─────────────────────────────────────────
             funding_result = funding_filter.analyze(pair, direction)
 
             if not funding_result.get("pass", True):
-                # Funding hard block → skip pair, kirim notif
                 logger.info(
-                    f"⏭️ {pair}: Funding rate block — "
+                    f"⏭️ {pair}: Funding block — "
                     f"{funding_result.get('reason')}"
                 )
                 telegram.send_funding_filter_skip(
@@ -438,24 +472,74 @@ class VortexBot:
                 )
                 return {}
 
-            # ── STEP 9: CONFLUENCE SCORING ───────────────────────────────────
+            # ── STEP 9: CORRELATION FILTER ───────────────────────────────────
+            # Fetch BTC 4H untuk correlation (skip kalau pair sudah BTC)
+            df_btc_corr = None
+            if "BTC" not in pair.upper():
+                try:
+                    ohlcv_btc = exchange.get_ohlcv(
+                        "BTC-USDT-SWAP", cfg.TF_BIAS, limit=50
+                    )
+                    if ohlcv_btc:
+                        df_btc_corr = indicators.ohlcv_to_df(ohlcv_btc)
+                except Exception:
+                    pass
+
+            corr_result = correlation_filter.analyze(
+                pair      =pair,
+                direction =direction,
+                df_btc_4h =(
+                    df_btc_corr
+                    if df_btc_corr is not None
+                    else df_4h
+                ),
+            )
+
+            if not corr_result.get("pass", True):
+                logger.info(
+                    f"⏭️ {pair}: Correlation block — "
+                    f"{corr_result.get('reason')}"
+                )
+                # Anti-spam: notif hanya 1x per 30 menit
+                now_ts     = time.time()
+                last_notif = self._corr_skip_notified.get(pair, 0)
+                if now_ts - last_notif > 1800:
+                    telegram.send(
+                        f"⚠️ <b>CORRELATION BLOCK</b>\n"
+                        f"Pair : {pair}\n"
+                        f"Dir  : {direction}\n"
+                        f"BTC  : "
+                        f"{corr_result.get('btc_trend')} "
+                        f"{corr_result.get('btc_strength', '')}\n"
+                        f"{corr_result.get('reason', '')}"
+                    )
+                    self._corr_skip_notified[pair] = now_ts
+                return {}
+
+            # ── STEP 10: CONFLUENCE SCORING ──────────────────────────────────
             score_result = confluence_scorer.calculate(
-                direction      =direction,
-                indicators     =ind_15m,
-                smc_analysis   =smc_result,
-                fib_analysis   =fib_result,
-                session_info   =session_info,
-                news_status    =news_status,
-                breakout_info  =bp_breakout,
-                pullback_info  =bp_pullback,
-                vwap_result    =vwap_result,
-                funding_result =funding_result,
+                direction          =direction,
+                indicators         =ind_15m,
+                smc_analysis       =smc_result,
+                fib_analysis       =fib_result,
+                session_info       =session_info,
+                news_status        =news_status,
+                breakout_info      =bp_breakout,
+                pullback_info      =bp_pullback,
+                vwap_result        =vwap_result,
+                funding_result     =funding_result,
+                correlation_result =corr_result,
             )
 
             score     = score_result.get("score", 0)
             is_valid  = score_result.get("is_valid", False)
             grade     = score_result.get("grade", "F")
             hard_fail = score_result.get("hard_fail", False)
+
+            # ── REGIME BOOST — threshold efektif naik saat RANGING ───────────
+            regime_boost  = risk_manager.get_regime_score_boost()
+            effective_min = cfg.MIN_CONFLUENCE_SCORE + regime_boost
+            regime_valid  = score >= effective_min and not hard_fail
 
             score_log = self._build_score_log(
                 pair           =pair,
@@ -464,15 +548,28 @@ class VortexBot:
                 bp_result      =bp_result,
                 vwap_result    =vwap_result,
                 funding_result =funding_result,
+                corr_result    =corr_result,
                 score          =score,
+                effective_min  =effective_min,
             )
             logger.info(f"📊 {score_log}")
 
-            if not is_valid:
-                reason = "HARD BLOCK" if hard_fail else (
-                    f"score {score}/23 below "
-                    f"{cfg.MIN_CONFLUENCE_SCORE}"
-                )
+            if not regime_valid:
+                if hard_fail:
+                    reason = "HARD BLOCK"
+                elif regime_boost > 0 and is_valid and not regime_valid:
+                    regime_data = risk_manager.get_cached_regime()
+                    reason = (
+                        f"Regime boost: "
+                        f"{regime_data.get('regime')} "
+                        f"+{regime_boost} → "
+                        f"need {effective_min}, got {score}"
+                    )
+                else:
+                    reason = (
+                        f"score {score}/{effective_min} "
+                        f"below threshold"
+                    )
                 logger.info(f"⏭️ {pair}: {reason} ({grade})")
                 return {}
 
@@ -507,8 +604,8 @@ class VortexBot:
                 "stoch_k"          : ind_15m.get("stoch_k", 0),
                 "stoch_d"          : ind_15m.get("stoch_d", 0),
                 "stoch_zone"       : (
-                    "oversold"   if ind_15m.get("stoch_oversold")  else
-                    "overbought" if ind_15m.get("stoch_overbought") else
+                    "oversold"   if ind_15m.get("stoch_oversold")   else
+                    "overbought" if ind_15m.get("stoch_overbought")  else
                     "neutral"
                 ),
                 "atr_value"        : atr_val,
@@ -522,6 +619,7 @@ class VortexBot:
                     smc_result.get("bos_4h") or
                     smc_result.get("bos_1h", False)
                 ),
+                "bos_fresh"        : score_result.get("bos_fresh", False),
                 "choch_detected"   : (
                     smc_result.get("choch_4h") or
                     smc_result.get("choch_1h", False)
@@ -544,9 +642,19 @@ class VortexBot:
                 "vwap_side"        : vwap_result.get("side"),
                 "vwap_zone"        : vwap_result.get("zone"),
                 "vwap_diff_pct"    : vwap_result.get("diff_pct", 0),
+                "vwap_session"     : vwap_result.get("session"),
                 # Funding Rate
                 "funding_rate"     : funding_result.get("rate", 0.0),
                 "funding_status"   : funding_result.get("status"),
+                # Correlation
+                "btc_trend"        : corr_result.get("btc_trend"),
+                "btc_strength"     : corr_result.get("btc_strength"),
+                # Regime
+                "regime"           : risk_manager.get_cached_regime().get(
+                    "regime"
+                ),
+                "regime_boost"     : regime_boost,
+                "effective_min_score": effective_min,
                 # Score
                 "score_breakdown"  : score_result.get("breakdown", {}),
                 "top_reasons"      : score_result.get("reasons", [])[:8],
@@ -569,12 +677,14 @@ class VortexBot:
             logger.info(
                 f"🎯 VALID SIGNAL!\n"
                 f"   {pair} {direction} "
-                f"Score:{score}/23 ({grade}) "
+                f"Score:{score}/{effective_min} ({grade}) "
                 f"RR:1:{rr2:.1f} "
                 f"SL:{tp_sl.get('sl_pct', 0):.2f}% "
                 f"BP:{bp_mode} "
-                f"VWAP:{vwap_result.get('zone','?')} "
-                f"Fund:{funding_result.get('rate', 0):+.3f}% | "
+                f"VWAP:{vwap_result.get('zone','?')}/"
+                f"{vwap_result.get('session','?')} "
+                f"BTC:{corr_result.get('btc_trend','?')} "
+                f"Regime:+{regime_boost} | "
                 f"{wib_str()}"
             )
 
@@ -679,6 +789,9 @@ class VortexBot:
                 "sl_pct"          : signal.get("sl_pct", 0),
                 "vwap_zone"       : signal.get("vwap_zone"),
                 "funding_rate"    : signal.get("funding_rate", 0),
+                "btc_trend"       : signal.get("btc_trend"),
+                "regime"          : signal.get("regime"),
+                "regime_boost"    : signal.get("regime_boost", 0),
             }
             trade_id = db.save_trade(trade_data)
 
@@ -723,7 +836,9 @@ class VortexBot:
                 f"qty={quantity} lev={leverage}x | "
                 f"entry={entry:.4f} sl={sl:.4f} "
                 f"({signal.get('sl_pct', 0):.2f}%) | "
-                f"BP:{bp_mode} VWAP:{signal.get('vwap_zone','?')} | "
+                f"BP:{bp_mode} VWAP:{signal.get('vwap_zone','?')} "
+                f"BTC:{signal.get('btc_trend','?')} "
+                f"Regime:+{signal.get('regime_boost', 0)} | "
                 f"{wib_str()}"
             )
 
@@ -824,7 +939,7 @@ class VortexBot:
 
             telegram.send_partial_close(trade, tp_hit, close_pct, pnl)
             logger.info(
-                f"🎯 Partial close: {pair} {tp_hit} "
+                f"🎯 Partial: {pair} {tp_hit} "
                 f"pnl=+{pnl:.4f} | {wib_str()}"
             )
         except Exception as e:
@@ -1014,10 +1129,11 @@ class VortexBot:
                 self.pairs[0], "1D", limit=200
             )
             df_1d  = indicators.ohlcv_to_df(ohlcv_1d)
-            regime = risk_manager.detect_market_regime(df_1d).get(
-                "regime", "UNKNOWN"
+            # Refresh regime cache tiap pagi
+            regime = risk_manager.detect_market_regime(df_1d)
+            telegram.send_morning_briefing(
+                balance, upcoming, regime.get("regime", "UNKNOWN")
             )
-            telegram.send_morning_briefing(balance, upcoming, regime)
             logger.info(f"☀️ Morning briefing | {wib_str()}")
         except Exception as e:
             logger.error(f"❌ Morning briefing error: {e}")
@@ -1061,7 +1177,7 @@ class VortexBot:
                 uptime, balance, len(self.open_trades)
             )
             logger.info(
-                f"💚 Health check: {uptime:.1f}h | "
+                f"💚 Health: {uptime:.1f}h | "
                 f"{wib_str()} | {utc_str()}"
             )
         except Exception as e:
@@ -1096,11 +1212,8 @@ class VortexBot:
             trades  = db.get_today_trades()
             summary = evaluator.create_session_summary(
                 "London Killzone", trades,
-                {
-                    "regime"    : "N/A",
-                    "btc_trend" : "N/A",
-                    "volatility": "N/A",
-                }
+                {"regime": "N/A", "btc_trend": "N/A",
+                 "volatility": "N/A"}
             )
             if summary and trades:
                 telegram.send(
@@ -1116,11 +1229,8 @@ class VortexBot:
             trades  = db.get_today_trades()
             summary = evaluator.create_session_summary(
                 "New York Killzone", trades,
-                {
-                    "regime"    : "N/A",
-                    "btc_trend" : "N/A",
-                    "volatility": "N/A",
-                }
+                {"regime": "N/A", "btc_trend": "N/A",
+                 "volatility": "N/A"}
             )
             if summary and trades:
                 telegram.send(
@@ -1155,7 +1265,8 @@ class VortexBot:
                     "date_utc": now_utc().isoformat(),
                 })
                 logger.info(
-                    f"📅 Monthly reset: ${balance:.4f} | {wib_str()}"
+                    f"📅 Monthly reset: "
+                    f"${balance:.4f} | {wib_str()}"
                 )
         except Exception as e:
             logger.error(f"❌ Monthly reset error: {e}")
@@ -1176,9 +1287,10 @@ class VortexBot:
             f"   Exchange : {EXCHANGE_NAME}\n"
             f"   Pairs    : {', '.join(self.pairs)}\n"
             f"   Interval : 60s\n"
-            f"   Strategy : SMC+Stoch+BP+VWAP+Funding\n"
-            f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/23\n"
+            f"   Strategy : SMC+Stoch+BP+VWAP+Fund+Corr\n"
+            f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/24\n"
             f"   SL       : 2.0x ATR Dynamic\n"
+            f"   Delays   : London+15m NY+5m Asia skip\n"
             f"   Time WIB : {wib_str()}\n"
             f"   Time UTC : {utc_str()}"
         )
@@ -1200,8 +1312,10 @@ class VortexBot:
                     continue
 
                 try:
-                    kz_event = session_filter.check_killzone_transition()
+                    kz_event = session_filter\
+                        .check_killzone_transition()
                     if kz_event.get("event"):
+                        delay = kz_event.get("entry_delay", 0)
                         telegram.send_killzone_alert(
                             event       =kz_event["event"],
                             session     =kz_event["session"],
@@ -1210,11 +1324,18 @@ class VortexBot:
                                 "minutes_left", 0
                             ),
                         )
-                        logger.info(
-                            f"🔔 Killzone {kz_event['event']}: "
-                            f"{kz_event['session']} | "
-                            f"{kz_event['wib_time']}"
-                        )
+                        if delay > 0 and kz_event["event"] == "started":
+                            logger.info(
+                                f"⏳ {kz_event['session']} started "
+                                f"— entry delay {delay} mnt | "
+                                f"{kz_event['wib_time']}"
+                            )
+                        else:
+                            logger.info(
+                                f"🔔 Killzone {kz_event['event']}: "
+                                f"{kz_event['session']} | "
+                                f"{kz_event['wib_time']}"
+                            )
                 except Exception as e:
                     logger.error(
                         f"❌ Killzone transition error: {e}"
@@ -1232,12 +1353,24 @@ class VortexBot:
 
                 telegram.update_last_scan()
 
+                # Log regime info sekali per scan
+                regime_data  = risk_manager.get_cached_regime()
+                regime_boost = risk_manager.get_regime_score_boost()
+                regime_str   = (
+                    f"{regime_data.get('emoji', '')} "
+                    f"{regime_data.get('regime', 'UNK')} "
+                    f"+{regime_boost}"
+                    if regime_data.get("regime") != "UNKNOWN"
+                    else "?"
+                )
+
                 logger.info(
                     f"✅ Scan done | "
                     f"{now_wib().strftime('%H:%M')} WIB | "
                     f"{now_utc().strftime('%H:%M')} UTC | "
-                    f"Signals: {signals_found} | "
-                    f"Trades: {len(self.open_trades)}"
+                    f"Signals:{signals_found} | "
+                    f"Trades:{len(self.open_trades)} | "
+                    f"Regime:{regime_str}"
                 )
 
                 time.sleep(60)
@@ -1262,11 +1395,11 @@ class VortexBot:
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════╗
-║         VΦrtex Bot v1.2                  ║
+║         VΦrtex Bot v1.3                  ║
 ║   Institutional Grade Trading Bot        ║
-║   SMC + Fibonacci + Breakout/Pullback    ║
-║   VWAP + Funding Rate | ATR 2.0x SL     ║
-║   Stochastic (5,3,3) | Score /23        ║
+║   SMC + Fibonacci + BP + VWAP            ║
+║   Funding + Correlation + Regime         ║
+║   BOS Freshness | ATR 2.0x | Score /24  ║
 ╚══════════════════════════════════════════╝
     """)
     bot = VortexBot()

@@ -1,6 +1,28 @@
 # ============================================
 # VORTEX BOT - RISK MANAGEMENT SYSTEM
 # ============================================
+#
+# FIX v1.3:
+#   - Regime-based confluence threshold
+#     detect_market_regime() sudah ada tapi belum
+#     dipakai untuk adjust threshold secara otomatis.
+#     Sekarang get_regime_score_boost() return berapa
+#     poin TAMBAHAN yang dibutuhkan sesuai regime:
+#
+#     BULL / BEAR       → +0  (threshold normal)
+#     RANGING           → +2  (market choppy, lebih selektif)
+#     HIGH_VOLATILITY   → +3  (market liar, sangat selektif)
+#     UNKNOWN           → +1  (tidak yakin, sedikit lebih ketat)
+#
+#   - Regime-aware position sizing
+#     Saat RANGING atau HIGH_VOLATILITY, risk_multiplier
+#     dari detect_market_regime() sudah ada (0.7/0.5)
+#     tapi belum diapply ke position sizing.
+#     Sekarang calculate_position() pakai risk_multiplier
+#     dari regime yang tersimpan di DB.
+#
+#   - Simpan regime ke DB setiap detect supaya
+#     main.py bisa ambil tanpa perlu detect ulang.
 
 import os
 import json
@@ -20,14 +42,13 @@ class RiskManager:
         self.recovery_mode_key = "recovery_mode"
         self.starting_bal_key  = "starting_balance"
         self.virtual_bal_key   = "virtual_balance"
+        self.regime_key        = "market_regime"   # NEW
 
-        # ── State untuk reserve balance OKX demo ─────────────────────────────
         self._reserved = 0.0
 
-    # ─── VIRTUAL BALANCE (Compound) ─────────
+    # ─── VIRTUAL BALANCE ────────────────────
 
     def get_virtual_balance(self) -> float:
-        """Ambil virtual balance dari DB (persistent)"""
         stored = db.get_state(self.virtual_bal_key)
         if stored:
             return float(stored.get("balance", cfg.CAPITAL))
@@ -35,7 +56,6 @@ class RiskManager:
         return float(cfg.CAPITAL)
 
     def set_virtual_balance(self, balance: float):
-        """Simpan virtual balance ke DB"""
         db.set_state(self.virtual_bal_key, {
             "balance"   : balance,
             "updated_at": datetime.now().isoformat(),
@@ -43,19 +63,17 @@ class RiskManager:
         logger.info(f"💰 Virtual balance saved: ${balance:.4f}")
 
     def update_virtual_balance_after_trade(self, pnl: float):
-        """Update virtual balance setelah trade (compound!)"""
         current = self.get_virtual_balance()
         new_bal = max(0.0, current + pnl)
         self.set_virtual_balance(new_bal)
-        change = "+" if pnl >= 0 else ""
+        sign = "+" if pnl >= 0 else ""
         logger.info(
-            f"💰 Compound update: "
-            f"${current:.4f} → ${new_bal:.4f} "
-            f"({change}{pnl:.4f})"
+            f"💰 Compound: ${current:.4f} → ${new_bal:.4f} "
+            f"({sign}{pnl:.4f})"
         )
         return new_bal
 
-    # ─── RESERVE / RELEASE (OKX Demo) ───────
+    # ─── RESERVE / RELEASE ──────────────────
 
     def reserve_balance(self, amount: float):
         self._reserved += amount
@@ -63,28 +81,17 @@ class RiskManager:
     def release_balance(self, amount: float):
         self._reserved = max(0.0, self._reserved - amount)
 
-    # ─── BALANCE TRACKING ───────────────────
+    # ─── BALANCE HELPERS ────────────────────
 
     def _get_effective_balance(self,
                                raw_balance: float) -> float:
-        """
-        Ambil balance yang efektif untuk risk check.
-
-        FIX: OKX demo selalu pakai virtual balance
-        karena exchange.get_balance() di demo bisa return
-        nilai yang tidak konsisten (0 atau angka besar).
-        Ini root cause bot langsung pause setelah startup.
-        """
         if cfg.IS_OKX and cfg.IS_OKX_DEMO:
             return self.get_virtual_balance()
         return raw_balance
 
     def set_starting_balance(self, balance: float):
-        """Simpan balance awal hari ini"""
-        today  = datetime.now().strftime("%Y-%m-%d")
-        stored = db.get_state(self.starting_bal_key)
-
-        # FIX: Selalu pakai virtual balance untuk OKX demo
+        today     = datetime.now().strftime("%Y-%m-%d")
+        stored    = db.get_state(self.starting_bal_key)
         effective = self._get_effective_balance(balance)
 
         if not stored or stored.get("date") != today:
@@ -92,29 +99,16 @@ class RiskManager:
                 "date"   : today,
                 "balance": effective,
             })
-            logger.info(
-                f"💰 Starting balance: ${effective:.4f}"
-            )
+            logger.info(f"💰 Starting balance: ${effective:.4f}")
 
     def get_starting_balance(self) -> float:
-        """Ambil balance awal hari ini"""
         stored = db.get_state(self.starting_bal_key)
-        if stored:
-            return stored.get("balance", 0)
-        return 0
+        return stored.get("balance", 0) if stored else 0
 
     # ─── DRAWDOWN CHECKS ────────────────────
 
     def check_daily_drawdown(self,
                              current: float) -> dict:
-        """
-        Cek daily drawdown.
-
-        FIX: Pakai _get_effective_balance supaya OKX demo
-        selalu compare virtual vs virtual — bukan
-        exchange balance (yang bisa 0) vs virtual starting.
-        """
-        # FIX: Normalize balance sebelum cek
         current  = self._get_effective_balance(current)
         starting = self.get_starting_balance()
 
@@ -126,10 +120,7 @@ class RiskManager:
         exceeded = dd_pct >= limit
 
         if exceeded:
-            logger.warning(
-                f"⚠️ DAILY DRAWDOWN: {dd_pct:.2f}%"
-            )
-            # FIX: Pesan pakai nilai dari cfg, bukan hardcoded "5%"
+            logger.warning(f"⚠️ DAILY DRAWDOWN: {dd_pct:.2f}%")
             self._pause_bot(
                 f"Daily drawdown {limit:.0f}% reached"
             )
@@ -144,7 +135,6 @@ class RiskManager:
 
     def check_weekly_drawdown(self,
                               current: float) -> dict:
-        """Cek weekly drawdown (10%)"""
         current = self._get_effective_balance(current)
         weekly  = db.get_state("weekly_starting_balance")
         if not weekly:
@@ -168,7 +158,6 @@ class RiskManager:
 
     def check_monthly_drawdown(self,
                                current: float) -> dict:
-        """Cek monthly drawdown (15%)"""
         current = self._get_effective_balance(current)
         monthly = db.get_state("monthly_starting_balance")
         if not monthly:
@@ -193,7 +182,6 @@ class RiskManager:
     # ─── CONSECUTIVE LOSS ───────────────────
 
     def record_trade_result(self, is_win: bool):
-        """Catat hasil trade"""
         consec = db.get_state(self.consec_loss_key) or 0
 
         if is_win:
@@ -207,9 +195,7 @@ class RiskManager:
                     "active": True, "wins": wins
                 })
                 if wins >= 3:
-                    db.set_state(
-                        self.recovery_mode_key, None
-                    )
+                    db.set_state(self.recovery_mode_key, None)
                     logger.info("✅ Recovery mode OFF!")
         else:
             consec += 1
@@ -231,7 +217,6 @@ class RiskManager:
 
     def _pause_bot(self, reason: str,
                    pause_hours: int = 24):
-        """Pause bot"""
         resume = (
             datetime.now() + timedelta(hours=pause_hours)
         ).isoformat()
@@ -245,7 +230,6 @@ class RiskManager:
         logger.warning(f"⛔ BOT PAUSED: {reason}")
 
     def is_bot_paused(self) -> dict:
-        """Cek apakah bot paused"""
         data = db.get_state(self.bot_paused_key)
         if not data or not data.get("paused"):
             return {"paused": False}
@@ -254,9 +238,7 @@ class RiskManager:
             data.get("resume_at", "")
         )
         if datetime.now() >= resume_at:
-            db.set_state(
-                self.bot_paused_key, {"paused": False}
-            )
+            db.set_state(self.bot_paused_key, {"paused": False})
             logger.info("✅ Bot auto-resumed!")
             return {"paused": False}
 
@@ -272,7 +254,6 @@ class RiskManager:
         }
 
     def resume_bot(self):
-        """Manual resume"""
         db.set_state(self.bot_paused_key, {"paused": False})
         logger.info("✅ Bot manually resumed!")
 
@@ -280,15 +261,14 @@ class RiskManager:
 
     def get_risk_in_recovery(self,
                              normal_risk: float) -> float:
-        """Kurangi risk di recovery mode"""
         recovery = db.get_state(self.recovery_mode_key)
         if not recovery or not recovery.get("active"):
             return normal_risk
 
-        wins = recovery.get("wins", 0)
+        wins        = recovery.get("wins", 0)
         multipliers = {0: 0.5, 1: 0.75, 2: 0.9}
-        mult     = multipliers.get(wins, 1.0)
-        adjusted = normal_risk * mult
+        mult        = multipliers.get(wins, 1.0)
+        adjusted    = normal_risk * mult
 
         logger.info(
             f"🔄 Recovery risk: {adjusted:.2f}% "
@@ -296,15 +276,185 @@ class RiskManager:
         )
         return adjusted
 
+    # ─── MARKET REGIME ──────────────────────
+
+    def detect_market_regime(self,
+                             df_daily: pd.DataFrame) -> dict:
+        """
+        Deteksi market regime dari daily candle.
+        FIX v1.3: Simpan regime ke DB setelah detect
+        supaya main.py bisa ambil tanpa detect ulang.
+        """
+        try:
+            if df_daily is None or df_daily.empty or len(df_daily) < 20:
+                return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
+
+            close = df_daily["close"]
+            high  = df_daily["high"]
+            low   = df_daily["low"]
+
+            ema20 = close.ewm(span=20, adjust=False).mean()
+            ema50 = close.ewm(span=50, adjust=False).mean()
+
+            curr_price = float(close.iloc[-1])
+            curr_ema20 = float(ema20.iloc[-1])
+            curr_ema50 = float(ema50.iloc[-1])
+
+            tr = pd.concat([
+                high - low,
+                (high - close.shift(1)).abs(),
+                (low  - close.shift(1)).abs(),
+            ], axis=1).max(axis=1)
+            atr14   = float(tr.rolling(14).mean().iloc[-1])
+            atr_pct = atr14 / curr_price * 100
+
+            price_5d_ago = (
+                float(close.iloc[-5])
+                if len(close) >= 5
+                else curr_price
+            )
+            momentum_pct = (
+                (curr_price - price_5d_ago) /
+                price_5d_ago * 100
+            )
+
+            if (curr_price > curr_ema20 and
+                    curr_ema20 > curr_ema50 and
+                    momentum_pct > 0):
+                regime    = "BULL"
+                risk_mult = 1.0
+                emoji     = "📈"
+            elif (curr_price < curr_ema20 and
+                  curr_ema20 < curr_ema50 and
+                  momentum_pct < 0):
+                regime    = "BEAR"
+                risk_mult = 0.8
+                emoji     = "📉"
+            elif atr_pct > 3.0:
+                regime    = "HIGH_VOLATILITY"
+                risk_mult = 0.5
+                emoji     = "⚡"
+            else:
+                regime    = "RANGING"
+                risk_mult = 0.7
+                emoji     = "↔️"
+
+            result = {
+                "regime"          : regime,
+                "emoji"           : emoji,
+                "risk_multiplier" : risk_mult,
+                "ema20"           : curr_ema20,
+                "ema50"           : curr_ema50,
+                "atr_pct"         : atr_pct,
+                "momentum_pct"    : momentum_pct,
+                "current_price"   : curr_price,
+                "detected_at"     : datetime.now().isoformat(),
+            }
+
+            # FIX v1.3: simpan ke DB
+            db.set_state(self.regime_key, result)
+
+            logger.info(
+                f"🌍 Regime: {emoji} {regime} | "
+                f"risk_mult={risk_mult}x | "
+                f"ATR={atr_pct:.2f}% | "
+                f"momentum={momentum_pct:+.2f}%"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Market regime error: {e}")
+            return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
+
+    def get_cached_regime(self) -> dict:
+        """
+        Ambil regime terakhir dari DB tanpa detect ulang.
+        Dipakai main.py saat analyze_pair supaya tidak
+        fetch data 1D tiap scan (hemat API call).
+        Cache valid 4 jam — regime tidak berubah cepat.
+        """
+        try:
+            stored = db.get_state(self.regime_key)
+            if not stored:
+                return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
+
+            detected_at = datetime.fromisoformat(
+                stored.get("detected_at", "2000-01-01")
+            )
+            age_hours = (
+                datetime.now() - detected_at
+            ).total_seconds() / 3600
+
+            if age_hours > 4:
+                # Cache expired → return UNKNOWN, main loop
+                # akan refresh saat morning briefing
+                return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
+
+            return stored
+
+        except Exception as e:
+            logger.error(f"❌ Get cached regime error: {e}")
+            return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
+
+    # ─── REGIME SCORE BOOST ─────────────────
+
+    def get_regime_score_boost(self) -> int:
+        """
+        Berapa poin TAMBAHAN yang dibutuhkan untuk entry
+        berdasarkan market regime saat ini.
+
+        Logic:
+          BULL / BEAR       → +0  threshold normal
+          UNKNOWN           → +1  sedikit lebih ketat
+          RANGING           → +2  market choppy, banyak false signal
+          HIGH_VOLATILITY   → +3  market liar, sangat selektif
+
+        Dipakai di main.py:
+          effective_threshold = cfg.MIN_CONFLUENCE_SCORE + boost
+          if score >= effective_threshold → entry
+        """
+        try:
+            if not cfg.REGIME_ENABLED:
+                return 0
+
+            regime_data = self.get_cached_regime()
+            regime      = regime_data.get("regime", "UNKNOWN")
+
+            boost_map = {
+                "BULL"            : 0,
+                "BEAR"            : 0,
+                "RANGING"         : cfg.REGIME_RANGING_SCORE_BOOST,
+                "HIGH_VOLATILITY" : cfg.REGIME_RANGING_SCORE_BOOST + 1,
+                "UNKNOWN"         : 1,
+            }
+
+            boost = boost_map.get(regime, 0)
+
+            if boost > 0:
+                logger.debug(
+                    f"📊 Regime boost: {regime} → "
+                    f"+{boost} poin threshold "
+                    f"(min={cfg.MIN_CONFLUENCE_SCORE} → "
+                    f"effective={cfg.MIN_CONFLUENCE_SCORE + boost})"
+                )
+
+            return boost
+
+        except Exception as e:
+            logger.error(f"❌ Regime score boost error: {e}")
+            return 0
+
     # ─── POSITION SIZING ────────────────────
 
     def calculate_position(self,
                            balance    : float,
                            entry_price: float,
                            sl_price   : float) -> dict:
-        """Hitung posisi optimal"""
+        """
+        Hitung posisi optimal.
+        FIX v1.3: Apply regime risk_multiplier ke sizing.
+        """
         try:
-            # FIX: Pakai effective balance untuk sizing
             balance = self._get_effective_balance(balance)
 
             cap_mode   = cfg.get_capital_mode(balance)
@@ -313,9 +463,24 @@ class RiskManager:
             base_risk  = cap_mode["risk_percent"]
             max_trades = cap_mode["max_open_trades"]
 
-            risk_pct    = self.get_risk_in_recovery(base_risk)
-            risk_amount = balance * (risk_pct / 100)
+            # Recovery mode adjustment
+            risk_pct = self.get_risk_in_recovery(base_risk)
 
+            # FIX v1.3: Regime risk multiplier
+            regime_data  = self.get_cached_regime()
+            regime       = regime_data.get("regime", "UNKNOWN")
+            risk_mult    = regime_data.get("risk_multiplier", 1.0)
+
+            # Hanya kurangi risk saat regime tidak ideal
+            if regime in ("RANGING", "HIGH_VOLATILITY"):
+                risk_pct = risk_pct * risk_mult
+                logger.debug(
+                    f"📐 Regime risk adjust: "
+                    f"{regime} | mult={risk_mult} | "
+                    f"risk={risk_pct:.2f}%"
+                )
+
+            risk_amount = balance * (risk_pct / 100)
             sl_dist     = abs(entry_price - sl_price)
             sl_dist_pct = sl_dist / entry_price
 
@@ -333,7 +498,6 @@ class RiskManager:
             )
             quantity = round(pos_usdt / entry_price, 6)
 
-            # Minimum $1
             if pos_usdt < 1.0:
                 quantity = round(1.0 / entry_price, 6)
                 leverage = max_lev
@@ -348,12 +512,15 @@ class RiskManager:
                 "quantity"       : quantity,
                 "sl_distance_pct": sl_dist_pct * 100,
                 "max_open_trades": max_trades,
+                "regime"         : regime,
+                "regime_mult"    : risk_mult,
             }
 
             logger.info(
                 f"📐 Position: {mode_name} | "
-                f"risk={risk_pct}% | lev={leverage}x | "
-                f"qty={quantity} | pos=${pos_usdt:.4f}"
+                f"risk={risk_pct:.2f}% | lev={leverage}x | "
+                f"qty={quantity} | pos=${pos_usdt:.4f} | "
+                f"regime={regime}"
             )
             return result
 
@@ -369,7 +536,6 @@ class RiskManager:
                                 sl       : float,
                                 direction: str,
                                 atr      : float) -> dict:
-        """Trailing stop dinamis"""
         try:
             risk = abs(entry - sl)
 
@@ -412,9 +578,7 @@ class RiskManager:
                              tp1      : float,
                              tp2      : float,
                              direction: str,
-                             closed_tp1: bool = False
-                             ) -> dict:
-        """Partial close system"""
+                             closed_tp1: bool = False) -> dict:
         try:
             if direction == "BUY":
                 if not closed_tp1 and current >= tp1:
@@ -453,94 +617,14 @@ class RiskManager:
             logger.error(f"❌ Partial close error: {e}")
             return {"should_close": False}
 
-    # ─── MARKET REGIME ──────────────────────
-
-    def detect_market_regime(self, df_daily) -> dict:
-        """Deteksi market regime"""
-        try:
-            if df_daily is None or df_daily.empty:
-                return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
-
-            if len(df_daily) < 20:
-                return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
-
-            close = df_daily["close"]
-            high  = df_daily["high"]
-            low   = df_daily["low"]
-
-            ema20 = close.ewm(span=20, adjust=False).mean()
-            ema50 = close.ewm(span=50, adjust=False).mean()
-
-            curr_price = float(close.iloc[-1])
-            curr_ema20 = float(ema20.iloc[-1])
-            curr_ema50 = float(ema50.iloc[-1])
-
-            tr = pd.concat([
-                high - low,
-                (high - close.shift(1)).abs(),
-                (low  - close.shift(1)).abs(),
-            ], axis=1).max(axis=1)
-            atr14   = float(tr.rolling(14).mean().iloc[-1])
-            atr_pct = atr14 / curr_price * 100
-
-            price_5d_ago = float(close.iloc[-5]) \
-                if len(close) >= 5 else curr_price
-            momentum_pct = (
-                (curr_price - price_5d_ago) /
-                price_5d_ago * 100
-            )
-
-            if (curr_price > curr_ema20 and
-                    curr_ema20 > curr_ema50 and
-                    momentum_pct > 0):
-                regime = "BULL";    risk_mult = 1.0; emoji = "📈"
-            elif (curr_price < curr_ema20 and
-                  curr_ema20 < curr_ema50 and
-                  momentum_pct < 0):
-                regime = "BEAR";    risk_mult = 0.8; emoji = "📉"
-            elif atr_pct > 3.0:
-                regime = "HIGH_VOLATILITY"; risk_mult = 0.5; emoji = "⚡"
-            else:
-                regime = "RANGING"; risk_mult = 0.7; emoji = "↔️"
-
-            logger.info(
-                f"🌍 Market: {emoji} {regime} | "
-                f"risk_mult: {risk_mult}x | "
-                f"ATR: {atr_pct:.2f}% | "
-                f"momentum: {momentum_pct:+.2f}%"
-            )
-            return {
-                "regime"           : regime,
-                "emoji"            : emoji,
-                "risk_multiplier"  : risk_mult,
-                "ema20"            : curr_ema20,
-                "ema50"            : curr_ema50,
-                "atr_pct"          : atr_pct,
-                "momentum_pct"     : momentum_pct,
-                "current_price"    : curr_price,
-            }
-
-        except Exception as e:
-            logger.error(f"❌ Market regime error: {e}")
-            return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
-
     # ─── FULL RISK CHECK ────────────────────
 
     def full_risk_check(self,
                         current_balance: float) -> dict:
-        """
-        Cek semua risk sebelum entry.
-
-        FIX: Normalisasi balance di awal — satu titik
-        untuk semua check di bawahnya. Tidak ada lagi
-        inconsistency antara virtual vs exchange balance.
-        """
-        # Normalisasi satu kali di sini
         current_balance = self._get_effective_balance(
             current_balance
         )
 
-        # 1. Bot paused?
         pause = self.is_bot_paused()
         if pause["paused"]:
             return {
@@ -551,7 +635,6 @@ class RiskManager:
                 ),
             }
 
-        # 2. Daily drawdown?
         daily_dd = self.check_daily_drawdown(current_balance)
         if daily_dd["exceeded"]:
             return {
@@ -562,7 +645,6 @@ class RiskManager:
                 ),
             }
 
-        # 3. Weekly drawdown?
         weekly_dd = self.check_weekly_drawdown(current_balance)
         if weekly_dd["exceeded"]:
             return {
@@ -570,7 +652,6 @@ class RiskManager:
                 "reason"       : "Weekly drawdown 10% exceeded",
             }
 
-        # 4. Consecutive losses?
         consec = self.get_consecutive_losses()
         if consec >= 3:
             return {

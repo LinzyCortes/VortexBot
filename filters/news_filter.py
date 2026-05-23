@@ -1,22 +1,15 @@
 # ============================================
 # VORTEX BOT - NEWS & SESSION FILTER
+# FIX v1.3b:
+#   - get_session_info() tidak lagi treat in_delay
+#     sebagai should_avoid. BUG SEBELUMNYA: delay
+#     menyebabkan bot skip Step 1 analyze_pair()
+#     tanpa pernah masuk analisis SMC/Confluence.
+#     FIX: delay info direturn terpisah, should_avoid
+#     hanya dari avoid_times/avoid_always.
+#   - London delay 15 mnt, NY delay 5 mnt tetap.
+#   - Asia session skip tetap aktif.
 # ============================================
-#
-# FIX v1.3:
-#   - London killzone delay 15 menit (15:00–15:15 WIB)
-#     Institusi sering sweep liquidity di 15 menit
-#     pertama London sebelum trend sebenarnya jalan.
-#     Bot yang masuk langsung di 15:00 sering kena
-#     false move / stop hunt. Delay 15 menit = tunggu
-#     direction terkonfirmasi dulu.
-#
-#   - NY killzone delay 5 menit (20:30–20:35 WIB)
-#     NY open sering ada spike volatilitas tinggi di
-#     menit pertama. 5 menit cukup untuk filter.
-#
-#   - Upgrade avoid_times: tambah Asia session
-#     (02:00–07:00 WIB) sebagai low-priority skip
-#     karena volume sangat rendah untuk crypto.
 
 import requests
 from datetime import datetime, timezone, timedelta
@@ -232,29 +225,18 @@ class NewsFilter:
 
 class SessionFilter:
     """
-    Semua jam dalam WIB (Asia/Jakarta, UTC+7).
-
-    Killzone schedule:
-      London   : 15:00 – 17:30 WIB
-      New York : 20:30 – 23:00 WIB
-
-    FIX v1.3:
-      - London delay: skip 15:00–15:15 WIB
-        Institusi sering sweep liquidity di 15 menit
-        pertama sebelum trend jalan. Entry langsung di
-        15:00 → sering kena false move / stop hunt.
-
-      - NY delay: skip 20:30–20:35 WIB
-        Spike volatilitas tinggi di menit pertama NY.
-        5 menit cukup untuk filter initial noise.
-
-      - Killzone state persistent ke DB (dari v1.1)
-        supaya tidak reset setiap Railway redeploy.
+    FIX v1.3b:
+      - get_session_info() tidak lagi treat in_delay
+        sebagai should_avoid. Bot tetap analisis pair
+        selama delay — hanya execute_trade yang skip
+        karena is_killzone() return in_killzone=False.
+      - London delay: 15 mnt (15:00-15:15 WIB)
+      - NY delay    : 5 mnt  (20:30-20:35 WIB)
+      - Asia session skip    : 02:00-07:00 WIB
     """
 
-    # Delay dalam menit setelah killzone open
-    LONDON_ENTRY_DELAY_MIN = 15   # skip 15:00–15:15 WIB
-    NY_ENTRY_DELAY_MIN     = 5    # skip 20:30–20:35 WIB
+    LONDON_ENTRY_DELAY_MIN = 15
+    NY_ENTRY_DELAY_MIN     = 5
 
     def __init__(self):
         self.sessions = {
@@ -278,21 +260,19 @@ class SessionFilter:
 
         self.avoid_times = [
             {
-                "day"   : 0,            # Senin
+                "day"   : 0,
                 "start" : (0, 0),
                 "end"   : (2, 0),
                 "reason": "Monday Open — gap risk",
             },
             {
-                "day"   : 4,            # Jumat
+                "day"   : 4,
                 "start" : (22, 0),
                 "end"   : (23, 59),
                 "reason": "Friday Close — low volume",
             },
         ]
 
-        # Jam yang selalu di-skip tanpa peduli hari
-        # (low volume Asia, gunakan "all_days" marker)
         self.avoid_always = [
             {
                 "start" : (2, 0),
@@ -311,8 +291,6 @@ class SessionFilter:
             except Exception:
                 self._db = None
         return self._db
-
-    # ─── DB STATE HELPERS ───────────────────
 
     def _get_kz_state(self) -> dict:
         db = self._get_db()
@@ -344,8 +322,6 @@ class SessionFilter:
         if db:
             db.set_state("kz_notif_state", state)
 
-    # ─── KILLZONE CHECK ─────────────────────
-
     def _now_wib(self):
         now_wib  = datetime.now(WIB)
         hour_wib = now_wib.hour
@@ -354,15 +330,6 @@ class SessionFilter:
         return now_wib, hour_wib, minute, weekday
 
     def is_killzone(self) -> dict:
-        """
-        Cek apakah sekarang dalam killzone.
-
-        FIX v1.3: Tambah delay setelah open.
-        Kalau masih dalam window delay (misal 15:00–15:15
-        untuk London), return in_killzone=False dengan
-        reason "in_delay" supaya bot skip tapi tidak
-        keliru berpikir sudah di luar killzone.
-        """
         _, hour_wib, minute, _ = self._now_wib()
         now_min = hour_wib * 60 + minute
 
@@ -371,17 +338,14 @@ class SessionFilter:
             close_min = session["close"][0] * 60 + session["close"][1]
             pre_min   = session["pre_open"][0] * 60 + session["pre_open"][1]
             delay_min = session.get("delay", 0)
-            entry_min = open_min + delay_min  # waktu bot boleh entry
+            entry_min = open_min + delay_min
 
             if open_min <= now_min <= close_min:
-                # Dalam killzone window — tapi cek delay dulu
                 if now_min < entry_min:
-                    # Masih dalam delay window → skip entry
                     mins_to_entry = entry_min - now_min
                     logger.debug(
                         f"⏳ {session['name']} delay: "
-                        f"{mins_to_entry} mnt lagi baru entry "
-                        f"(tunggu false move selesai)"
+                        f"{mins_to_entry} mnt lagi baru entry"
                     )
                     return {
                         "in_killzone"    : False,
@@ -400,7 +364,6 @@ class SessionFilter:
                         },
                     }
 
-                # Delay sudah lewat → in killzone aktif
                 return {
                     "in_killzone"   : True,
                     "session"       : session["name"],
@@ -434,18 +397,7 @@ class SessionFilter:
             "next_session"  : next_s,
         }
 
-    # ─── KILLZONE TRANSITION ────────────────
-
     def check_killzone_transition(self) -> dict:
-        """
-        Cek transisi killzone untuk notifikasi Telegram.
-        State persistent ke DB (fix dari v1.1).
-
-        FIX v1.3: Notif "started" dikirim saat masuk
-        killzone window (bukan setelah delay), supaya
-        user tahu session sudah mulai meski bot belum
-        entry. Log juga menampilkan delay info.
-        """
         try:
             kz       = self.is_killzone()
             _, hour_wib, minute, _ = self._now_wib()
@@ -456,8 +408,6 @@ class SessionFilter:
             notified_end   = set(state.get("notified_end",   []))
             last_active    = state.get("last_active")
 
-            # Cek apakah sekarang dalam killzone window
-            # (termasuk delay window untuk notif)
             _, h, m, _ = self._now_wib()
             now_min    = h * 60 + m
 
@@ -542,8 +492,6 @@ class SessionFilter:
             logger.error(f"❌ check_killzone_transition error: {e}")
             return {"event": None}
 
-    # ─── HELPERS ────────────────────────────
-
     def _get_next_session(self, current_min: int) -> dict:
         candidates = []
         for key, session in self.sessions.items():
@@ -572,14 +520,9 @@ class SessionFilter:
         }
 
     def is_avoid_time(self) -> dict:
-        """
-        Cek waktu yang dihindari.
-        FIX v1.3: Tambah cek avoid_always (Asia session).
-        """
         _, hour_wib, minute, weekday = self._now_wib()
         now_min = hour_wib * 60 + minute
 
-        # Cek avoid_always (semua hari)
         for avoid in self.avoid_always:
             start = avoid["start"][0] * 60 + avoid["start"][1]
             end   = avoid["end"][0]   * 60 + avoid["end"][1]
@@ -589,7 +532,6 @@ class SessionFilter:
                     "reason"      : avoid["reason"],
                 }
 
-        # Cek avoid per hari
         for avoid in self.avoid_times:
             if avoid["day"] != weekday:
                 continue
@@ -604,7 +546,16 @@ class SessionFilter:
         return {"should_avoid": False, "reason": None}
 
     def get_session_info(self) -> dict:
-        """Info lengkap session sekarang dalam WIB."""
+        """
+        Info lengkap session sekarang dalam WIB.
+
+        FIX v1.3b: in_delay TIDAK lagi di-set sebagai should_avoid.
+        Bug sebelumnya: bot skip seluruh analyze_pair() saat delay
+        karena should_avoid=True → tidak ada log detail sama sekali.
+        Sekarang: delay direturn terpisah, should_avoid murni dari
+        avoid_times/avoid_always. Execute_trade tetap skip saat delay
+        karena is_killzone() return in_killzone=False.
+        """
         now_wib_dt, hour_wib, minute, _ = self._now_wib()
 
         if 0 <= hour_wib < 2:
@@ -636,14 +587,14 @@ class SessionFilter:
         killzone = self.is_killzone()
         avoid    = self.is_avoid_time()
 
-        # Tambah info delay ke should_avoid kalau sedang delay
         in_delay     = killzone.get("in_delay", False)
         should_avoid = avoid["should_avoid"]
         avoid_reason = avoid.get("reason", "")
 
-        if in_delay and not should_avoid:
-            should_avoid = True
-            avoid_reason = killzone.get("delay_reason", "Killzone delay")
+        # FIX: in_delay TIDAK mengubah should_avoid
+        # Bot tetap analisis pair saat delay window
+        # hanya execute_trade yang akan skip otomatis
+        # karena is_killzone() return in_killzone=False
 
         return {
             "active_session": active,
@@ -651,6 +602,7 @@ class SessionFilter:
             "session_name"  : killzone.get("session"),
             "is_pre_session": killzone.get("is_pre_session", False),
             "in_delay"      : in_delay,
+            "delay_reason"  : killzone.get("delay_reason", ""),
             "should_avoid"  : should_avoid,
             "avoid_reason"  : avoid_reason,
             "wib_time"      : f"{hour_wib:02d}:{minute:02d} WIB",

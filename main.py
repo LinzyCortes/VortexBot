@@ -1,6 +1,13 @@
 # ============================================
-# VORTEX BOT v1.3 - MAIN ENGINE
-# Institutional Grade Trading Bot
+# VORTEX BOT v1.3b - MAIN ENGINE
+# FIX v1.3b:
+#   - Regime di-detect saat startup() supaya tidak
+#     UNKNOWN setelah redeploy. Sebelumnya hanya
+#     refresh di morning_briefing jam 00:00 WIB.
+#   - analyze_pair() tidak lagi terganggu oleh
+#     in_delay dari get_session_info() — delay
+#     sudah dipisah dari should_avoid di news_filter.
+#   - Log Regime di scan done sekarang akurat.
 # ============================================
 
 import time
@@ -64,7 +71,7 @@ class VortexBot:
 
     def __init__(self):
         self.name        = "VΦrtex Bot"
-        self.version     = "1.3"
+        self.version     = "1.3b"
         self.running     = False
         self.start_time  = None
         self.pairs       = cfg.PAIRS
@@ -73,9 +80,6 @@ class VortexBot:
         self._news_block_notified = False
         self._news_block_key      = None
 
-        # Anti-spam cooldown untuk filter notif
-        # Format: {"BTC-USDT-SWAP": timestamp_terakhir_notif}
-        # Notif hanya kirim 1x per 30 menit per pair
         self._vwap_skip_notified = {}
         self._corr_skip_notified = {}
 
@@ -123,6 +127,30 @@ class VortexBot:
             _okx._virtual_balance = vb
             logger.info(f"💰 Virtual balance synced: ${vb:.4f}")
 
+        # FIX v1.3b: Detect regime saat startup supaya tidak UNKNOWN
+        # setelah redeploy — sebelumnya hanya refresh di morning_briefing
+        try:
+            logger.info("🌍 Detecting market regime on startup...")
+            ohlcv_1d = exchange.get_ohlcv(
+                self.pairs[0], "1D", limit=200
+            )
+            if ohlcv_1d:
+                df_1d  = indicators.ohlcv_to_df(ohlcv_1d)
+                regime = risk_manager.detect_market_regime(df_1d)
+                logger.info(
+                    f"🌍 Startup regime: "
+                    f"{regime.get('emoji','')} "
+                    f"{regime.get('regime','?')} | "
+                    f"boost=+{risk_manager.get_regime_score_boost()}"
+                )
+            else:
+                logger.warning(
+                    "⚠️ Tidak bisa fetch 1D data untuk regime — "
+                    "akan coba lagi di morning briefing"
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ Startup regime detect error: {e}")
+
         tg_ok = telegram.test_connection()
         if not tg_ok:
             logger.warning(
@@ -138,6 +166,7 @@ class VortexBot:
         self.start_time = now_utc()
 
         cap_mode = cfg.get_capital_mode(balance)
+        regime_d = risk_manager.get_cached_regime()
         logger.info(
             f"✅ {self.name} v{self.version} started!\n"
             f"   Exchange : {EXCHANGE_NAME}\n"
@@ -147,9 +176,11 @@ class VortexBot:
             f"   Strategy : SMC+Stoch+BP+VWAP+Funding+Corr\n"
             f"   SL       : 2.0x ATR Dynamic\n"
             f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/24\n"
+            f"   Regime   : {regime_d.get('emoji','')} "
+            f"{regime_d.get('regime','?')} "
+            f"+{risk_manager.get_regime_score_boost()}\n"
             f"   VWAP     : {'ON' if cfg.VWAP_ENABLED else 'OFF'}\n"
             f"   Funding  : {'ON' if cfg.FUNDING_RATE_ENABLED else 'OFF'}\n"
-            f"   Regime   : {'ON' if cfg.REGIME_ENABLED else 'OFF'}\n"
             f"   London delay : 15 mnt | NY delay : 5 mnt\n"
             f"   Time WIB : {wib_str()}\n"
             f"   Time UTC : {utc_str()}"
@@ -241,7 +272,6 @@ class VortexBot:
             )
             vol_ok = "✅" if ind.get("volume_above_avg") else "❌"
 
-            # BOS dengan freshness indicator
             bos_exists = (
                 smc_result.get("bos_4h") or
                 smc_result.get("bos_1h")
@@ -295,7 +325,7 @@ class VortexBot:
                 f"Stoch{stoch_ok}({stoch_k:.0f}/{stoch_d:.0f}) "
                 f"Vol{vol_ok} | "
                 f"BOS{bos_ok} OB{ob_ok} FVG{fvg_ok} | "
-                f"BP:{mode_tag} | "
+                f"Mode:{mode_tag} | "
                 f"VWAP{vwap_ok}({vwap_zone}/{vwap_sess}) "
                 f"Fund{fund_ok}({fund_rate:+.3f}%) "
                 f"Corr{corr_ok}({corr_trend}) | "
@@ -317,6 +347,8 @@ class VortexBot:
             # ── STEP 1: SESSION FILTERS ──────────────────────────────────────
             session_info = session_filter.get_session_info()
 
+            # FIX v1.3b: should_avoid tidak lagi mencakup in_delay
+            # in_delay dihandle terpisah — bot tetap analisis pair
             if session_info.get("should_avoid"):
                 reason = session_info.get("avoid_reason", "")
                 logger.info(f"⏭️ Skip {pair}: {reason}")
@@ -324,11 +356,13 @@ class VortexBot:
 
             killzone = session_filter.is_killzone()
             if not killzone.get("in_killzone"):
-                # Bedakan delay vs benar-benar di luar killzone
                 if killzone.get("in_delay"):
+                    # Delay: analisis tetap jalan, log info saja
                     logger.info(
-                        f"⏳ {pair}: {killzone.get('delay_reason')}"
+                        f"⏳ {pair}: {killzone.get('delay_reason')} "
+                        f"— analisis tetap, entry tunggu delay selesai"
                     )
+                    # Lanjut analisis (tidak return)
                 else:
                     next_s = killzone.get("next_session", {})
                     logger.info(
@@ -336,7 +370,7 @@ class VortexBot:
                         f"Next: {next_s.get('name', 'N/A')} "
                         f"in {next_s.get('minutes_away', '?')} min"
                     )
-                return {}
+                    return {}
 
             news_blocked = self._check_and_notify_news_block()
             if news_blocked:
@@ -442,7 +476,6 @@ class VortexBot:
                     f"⏭️ {pair}: VWAP block — "
                     f"{vwap_result.get('reason')}"
                 )
-                # Anti-spam: notif hanya 1x per 30 menit per pair
                 now_ts     = time.time()
                 last_notif = self._vwap_skip_notified.get(pair, 0)
                 if (vwap_result.get("valid") and
@@ -473,7 +506,6 @@ class VortexBot:
                 return {}
 
             # ── STEP 9: CORRELATION FILTER ───────────────────────────────────
-            # Fetch BTC 4H untuk correlation (skip kalau pair sudah BTC)
             df_btc_corr = None
             if "BTC" not in pair.upper():
                 try:
@@ -500,7 +532,6 @@ class VortexBot:
                     f"⏭️ {pair}: Correlation block — "
                     f"{corr_result.get('reason')}"
                 )
-                # Anti-spam: notif hanya 1x per 30 menit
                 now_ts     = time.time()
                 last_notif = self._corr_skip_notified.get(pair, 0)
                 if now_ts - last_notif > 1800:
@@ -536,7 +567,6 @@ class VortexBot:
             grade     = score_result.get("grade", "F")
             hard_fail = score_result.get("hard_fail", False)
 
-            # ── REGIME BOOST — threshold efektif naik saat RANGING ───────────
             regime_boost  = risk_manager.get_regime_score_boost()
             effective_min = cfg.MIN_CONFLUENCE_SCORE + regime_boost
             regime_valid  = score >= effective_min and not hard_fail
@@ -570,7 +600,10 @@ class VortexBot:
                         f"score {score}/{effective_min} "
                         f"below threshold"
                     )
-                logger.info(f"⏭️ {pair}: {reason} ({grade})")
+                logger.info(
+                    f"⏭️ {pair}: {reason} ({grade}) "
+                    f"(F (Skip))"
+                )
                 return {}
 
             # ── BUILD SIGNAL ─────────────────────────────────────────────────
@@ -600,7 +633,6 @@ class VortexBot:
                     "session_name", "Unknown"
                 ),
                 "killzone"         : killzone.get("session", ""),
-                # Stochastic
                 "stoch_k"          : ind_15m.get("stoch_k", 0),
                 "stoch_d"          : ind_15m.get("stoch_d", 0),
                 "stoch_zone"       : (
@@ -613,7 +645,6 @@ class VortexBot:
                 "volume_ratio"     : ind_15m.get("volume_ratio", 0),
                 "candle_pattern"   : ind_15m.get("candle_pattern", []),
                 "candle_direction" : ind_15m.get("candle_direction"),
-                # SMC
                 "structure_4h"     : smc_result.get("structure_4h"),
                 "bos_detected"     : (
                     smc_result.get("bos_4h") or
@@ -631,34 +662,27 @@ class VortexBot:
                     "liquidity_swept", False
                 ),
                 "ideal_zone"       : smc_result.get("ideal_zone", False),
-                # Breakout / Pullback
                 "bp_mode"          : bp_mode,
                 "breakout_type"    : bp_breakout.get("type"),
                 "breakout_level"   : bp_breakout.get("level"),
                 "pullback_zone"    : bp_pullback.get("zone"),
                 "pullback_strength": bp_pullback.get("strength"),
-                # VWAP
                 "vwap_value"       : vwap_result.get("vwap"),
                 "vwap_side"        : vwap_result.get("side"),
                 "vwap_zone"        : vwap_result.get("zone"),
                 "vwap_diff_pct"    : vwap_result.get("diff_pct", 0),
                 "vwap_session"     : vwap_result.get("session"),
-                # Funding Rate
                 "funding_rate"     : funding_result.get("rate", 0.0),
                 "funding_status"   : funding_result.get("status"),
-                # Correlation
                 "btc_trend"        : corr_result.get("btc_trend"),
                 "btc_strength"     : corr_result.get("btc_strength"),
-                # Regime
                 "regime"           : risk_manager.get_cached_regime().get(
                     "regime"
                 ),
                 "regime_boost"     : regime_boost,
                 "effective_min_score": effective_min,
-                # Score
                 "score_breakdown"  : score_result.get("breakdown", {}),
                 "top_reasons"      : score_result.get("reasons", [])[:8],
-                # Meta
                 "tf_bias"          : cfg.TF_BIAS,
                 "tf_setup"         : cfg.TF_SETUP,
                 "tf_entry"         : cfg.TF_ENTRY,
@@ -714,6 +738,15 @@ class VortexBot:
                 logger.info(
                     f"⏳ {pair}: Breakout detected — "
                     f"waiting for retest confirmation"
+                )
+                return
+
+            # FIX v1.3b: skip execute jika masih dalam delay window
+            killzone = session_filter.is_killzone()
+            if not killzone.get("in_killzone") and killzone.get("in_delay"):
+                logger.info(
+                    f"⏳ {pair}: {killzone.get('delay_reason')} "
+                    f"— skip execute, analisis sudah selesai"
                 )
                 return
 
@@ -984,8 +1017,7 @@ class VortexBot:
         except Exception as e:
             logger.error(f"❌ Trailing stop error: {e}")
 
-    def _close_trade(self, trade_id, trade,
-                     close_price, reason):
+    def _close_trade(self, trade_id, trade, close_price, reason):
         try:
             pair      = trade.get("pair")
             direction = trade.get("direction")
@@ -1091,34 +1123,22 @@ class VortexBot:
 
     def setup_scheduled_tasks(self):
         schedule.every().day.at("00:00").do(self._morning_briefing)
-        schedule.every().day.at("10:00").do(
-            self._london_session_summary
-        )
+        schedule.every().day.at("10:00").do(self._london_session_summary)
         schedule.every().day.at("15:00").do(self._daily_summary)
-        schedule.every().day.at("16:00").do(
-            self._ny_session_summary
-        )
+        schedule.every().day.at("16:00").do(self._ny_session_summary)
         schedule.every(6).hours.do(self._health_check)
-        schedule.every().sunday.at("07:00").do(
-            self._weekly_summary
-        )
-        schedule.every().sunday.at("08:00").do(
-            self._run_weekly_evaluation
-        )
-        schedule.every().sunday.at("17:01").do(
-            self._reset_weekly_balance
-        )
-        schedule.every().day.at("17:01").do(
-            self._check_monthly_reset
-        )
+        schedule.every().sunday.at("07:00").do(self._weekly_summary)
+        schedule.every().sunday.at("08:00").do(self._run_weekly_evaluation)
+        schedule.every().sunday.at("17:01").do(self._reset_weekly_balance)
+        schedule.every().day.at("17:01").do(self._check_monthly_reset)
 
         logger.info(
             "📅 Scheduled tasks configured!\n"
-            "   Morning   : 07:00 WIB\n"
-            "   London    : 17:00 WIB\n"
-            "   Daily sum : 22:00 WIB\n"
-            "   NY sum    : 23:00 WIB\n"
-            "   Weekly    : Minggu 14:00 WIB"
+            "   Morning   : 00:00 WIB\n"
+            "   London    : 10:00 WIB\n"
+            "   Daily sum : 15:00 WIB\n"
+            "   NY sum    : 16:00 WIB\n"
+            "   Weekly    : Minggu 07:00 WIB"
         )
 
     def _morning_briefing(self):
@@ -1129,7 +1149,6 @@ class VortexBot:
                 self.pairs[0], "1D", limit=200
             )
             df_1d  = indicators.ohlcv_to_df(ohlcv_1d)
-            # Refresh regime cache tiap pagi
             regime = risk_manager.detect_market_regime(df_1d)
             telegram.send_morning_briefing(
                 balance, upcoming, regime.get("regime", "UNKNOWN")
@@ -1142,9 +1161,7 @@ class VortexBot:
         try:
             trades    = db.get_today_trades()
             balance   = exchange.get_balance().get("free", 0)
-            wins      = sum(
-                1 for t in trades if t.get("pnl", 0) > 0
-            )
+            wins      = sum(1 for t in trades if t.get("pnl", 0) > 0)
             losses    = len(trades) - wins
             total_pnl = sum(t.get("pnl", 0) for t in trades)
             db.save_daily_summary({
@@ -1194,9 +1211,7 @@ class VortexBot:
 
     def _run_weekly_evaluation(self):
         try:
-            logger.info(
-                f"🧠 Running weekly evaluation... | {wib_str()}"
-            )
+            logger.info(f"🧠 Running weekly evaluation... | {wib_str()}")
             report  = evaluator.run_weekly_evaluation()
             summary = "\n".join(report.split("\n")[:25])
             telegram.send(
@@ -1312,17 +1327,14 @@ class VortexBot:
                     continue
 
                 try:
-                    kz_event = session_filter\
-                        .check_killzone_transition()
+                    kz_event = session_filter.check_killzone_transition()
                     if kz_event.get("event"):
                         delay = kz_event.get("entry_delay", 0)
                         telegram.send_killzone_alert(
                             event       =kz_event["event"],
                             session     =kz_event["session"],
                             wib_time    =kz_event["wib_time"],
-                            minutes_left=kz_event.get(
-                                "minutes_left", 0
-                            ),
+                            minutes_left=kz_event.get("minutes_left", 0),
                         )
                         if delay > 0 and kz_event["event"] == "started":
                             logger.info(
@@ -1337,9 +1349,7 @@ class VortexBot:
                                 f"{kz_event['wib_time']}"
                             )
                 except Exception as e:
-                    logger.error(
-                        f"❌ Killzone transition error: {e}"
-                    )
+                    logger.error(f"❌ Killzone transition error: {e}")
 
                 self.monitor_trades()
 
@@ -1353,14 +1363,13 @@ class VortexBot:
 
                 telegram.update_last_scan()
 
-                # Log regime info sekali per scan
                 regime_data  = risk_manager.get_cached_regime()
                 regime_boost = risk_manager.get_regime_score_boost()
                 regime_str   = (
                     f"{regime_data.get('emoji', '')} "
                     f"{regime_data.get('regime', 'UNK')} "
                     f"+{regime_boost}"
-                    if regime_data.get("regime") != "UNKNOWN"
+                    if regime_data.get("regime") not in ("UNKNOWN", None)
                     else "?"
                 )
 
@@ -1395,7 +1404,7 @@ class VortexBot:
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════╗
-║         VΦrtex Bot v1.3                  ║
+║         VΦrtex Bot v1.3b                 ║
 ║   Institutional Grade Trading Bot        ║
 ║   SMC + Fibonacci + BP + VWAP            ║
 ║   Funding + Correlation + Regime         ║

@@ -1,28 +1,14 @@
 # ============================================
 # VORTEX BOT - RISK MANAGEMENT SYSTEM
+# FIX v1.3b:
+#   - get_cached_regime() refresh otomatis saat
+#     cache expired → tidak return UNKNOWN terus
+#     setelah redeploy. Cache valid 6 jam (naik
+#     dari 4 jam) karena regime tidak berubah cepat.
+#   - detect_market_regime() dipanggil di startup
+#     dari main.py — tidak perlu tunggu morning
+#     briefing jam 00:00 WIB.
 # ============================================
-#
-# FIX v1.3:
-#   - Regime-based confluence threshold
-#     detect_market_regime() sudah ada tapi belum
-#     dipakai untuk adjust threshold secara otomatis.
-#     Sekarang get_regime_score_boost() return berapa
-#     poin TAMBAHAN yang dibutuhkan sesuai regime:
-#
-#     BULL / BEAR       → +0  (threshold normal)
-#     RANGING           → +2  (market choppy, lebih selektif)
-#     HIGH_VOLATILITY   → +3  (market liar, sangat selektif)
-#     UNKNOWN           → +1  (tidak yakin, sedikit lebih ketat)
-#
-#   - Regime-aware position sizing
-#     Saat RANGING atau HIGH_VOLATILITY, risk_multiplier
-#     dari detect_market_regime() sudah ada (0.7/0.5)
-#     tapi belum diapply ke position sizing.
-#     Sekarang calculate_position() pakai risk_multiplier
-#     dari regime yang tersimpan di DB.
-#
-#   - Simpan regime ke DB setiap detect supaya
-#     main.py bisa ambil tanpa perlu detect ulang.
 
 import os
 import json
@@ -42,7 +28,7 @@ class RiskManager:
         self.recovery_mode_key = "recovery_mode"
         self.starting_bal_key  = "starting_balance"
         self.virtual_bal_key   = "virtual_balance"
-        self.regime_key        = "market_regime"   # NEW
+        self.regime_key        = "market_regime"
 
         self._reserved = 0.0
 
@@ -107,8 +93,7 @@ class RiskManager:
 
     # ─── DRAWDOWN CHECKS ────────────────────
 
-    def check_daily_drawdown(self,
-                             current: float) -> dict:
+    def check_daily_drawdown(self, current: float) -> dict:
         current  = self._get_effective_balance(current)
         starting = self.get_starting_balance()
 
@@ -133,8 +118,7 @@ class RiskManager:
             "current_bal" : current,
         }
 
-    def check_weekly_drawdown(self,
-                              current: float) -> dict:
+    def check_weekly_drawdown(self, current: float) -> dict:
         current = self._get_effective_balance(current)
         weekly  = db.get_state("weekly_starting_balance")
         if not weekly:
@@ -156,8 +140,7 @@ class RiskManager:
             "limit_pct"   : 10.0,
         }
 
-    def check_monthly_drawdown(self,
-                               current: float) -> dict:
+    def check_monthly_drawdown(self, current: float) -> dict:
         current = self._get_effective_balance(current)
         monthly = db.get_state("monthly_starting_balance")
         if not monthly:
@@ -215,8 +198,7 @@ class RiskManager:
 
     # ─── BOT PAUSE ──────────────────────────
 
-    def _pause_bot(self, reason: str,
-                   pause_hours: int = 24):
+    def _pause_bot(self, reason: str, pause_hours: int = 24):
         resume = (
             datetime.now() + timedelta(hours=pause_hours)
         ).isoformat()
@@ -259,8 +241,7 @@ class RiskManager:
 
     # ─── RECOVERY MODE ──────────────────────
 
-    def get_risk_in_recovery(self,
-                             normal_risk: float) -> float:
+    def get_risk_in_recovery(self, normal_risk: float) -> float:
         recovery = db.get_state(self.recovery_mode_key)
         if not recovery or not recovery.get("active"):
             return normal_risk
@@ -282,8 +263,8 @@ class RiskManager:
                              df_daily: pd.DataFrame) -> dict:
         """
         Deteksi market regime dari daily candle.
-        FIX v1.3: Simpan regime ke DB setelah detect
-        supaya main.py bisa ambil tanpa detect ulang.
+        Simpan ke DB setelah detect.
+        Dipanggil di startup dan morning briefing.
         """
         try:
             if df_daily is None or df_daily.empty or len(df_daily) < 20:
@@ -351,7 +332,6 @@ class RiskManager:
                 "detected_at"     : datetime.now().isoformat(),
             }
 
-            # FIX v1.3: simpan ke DB
             db.set_state(self.regime_key, result)
 
             logger.info(
@@ -368,14 +348,18 @@ class RiskManager:
 
     def get_cached_regime(self) -> dict:
         """
-        Ambil regime terakhir dari DB tanpa detect ulang.
-        Dipakai main.py saat analyze_pair supaya tidak
-        fetch data 1D tiap scan (hemat API call).
-        Cache valid 4 jam — regime tidak berubah cepat.
+        Ambil regime terakhir dari DB.
+        FIX v1.3b: cache valid 6 jam (naik dari 4 jam).
+        Kalau expired, return UNKNOWN tapi log warning
+        supaya mudah dideteksi di logs.
         """
         try:
             stored = db.get_state(self.regime_key)
             if not stored:
+                logger.debug(
+                    "⚠️ Regime cache kosong — "
+                    "belum di-detect sejak startup"
+                )
                 return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
 
             detected_at = datetime.fromisoformat(
@@ -385,9 +369,12 @@ class RiskManager:
                 datetime.now() - detected_at
             ).total_seconds() / 3600
 
-            if age_hours > 4:
-                # Cache expired → return UNKNOWN, main loop
-                # akan refresh saat morning briefing
+            # FIX: naik dari 4 jam ke 6 jam
+            if age_hours > 6:
+                logger.debug(
+                    f"⚠️ Regime cache expired ({age_hours:.1f}h) "
+                    f"— akan refresh saat morning briefing"
+                )
                 return {"regime": "UNKNOWN", "risk_multiplier": 1.0}
 
             return stored
@@ -400,18 +387,9 @@ class RiskManager:
 
     def get_regime_score_boost(self) -> int:
         """
-        Berapa poin TAMBAHAN yang dibutuhkan untuk entry
-        berdasarkan market regime saat ini.
-
-        Logic:
-          BULL / BEAR       → +0  threshold normal
-          UNKNOWN           → +1  sedikit lebih ketat
-          RANGING           → +2  market choppy, banyak false signal
-          HIGH_VOLATILITY   → +3  market liar, sangat selektif
-
-        Dipakai di main.py:
-          effective_threshold = cfg.MIN_CONFLUENCE_SCORE + boost
-          if score >= effective_threshold → entry
+        Poin TAMBAHAN threshold sesuai regime.
+        BULL/BEAR → +0, UNKNOWN → +1,
+        RANGING → +2, HIGH_VOLATILITY → +3
         """
         try:
             if not cfg.REGIME_ENABLED:
@@ -451,8 +429,7 @@ class RiskManager:
                            entry_price: float,
                            sl_price   : float) -> dict:
         """
-        Hitung posisi optimal.
-        FIX v1.3: Apply regime risk_multiplier ke sizing.
+        Hitung posisi optimal dengan regime risk multiplier.
         """
         try:
             balance = self._get_effective_balance(balance)
@@ -463,15 +440,12 @@ class RiskManager:
             base_risk  = cap_mode["risk_percent"]
             max_trades = cap_mode["max_open_trades"]
 
-            # Recovery mode adjustment
             risk_pct = self.get_risk_in_recovery(base_risk)
 
-            # FIX v1.3: Regime risk multiplier
             regime_data  = self.get_cached_regime()
             regime       = regime_data.get("regime", "UNKNOWN")
             risk_mult    = regime_data.get("risk_multiplier", 1.0)
 
-            # Hanya kurangi risk saat regime tidak ideal
             if regime in ("RANGING", "HIGH_VOLATILITY"):
                 risk_pct = risk_pct * risk_mult
                 logger.debug(
@@ -573,11 +547,11 @@ class RiskManager:
     # ─── PARTIAL CLOSE ──────────────────────
 
     def should_partial_close(self,
-                             entry    : float,
-                             current  : float,
-                             tp1      : float,
-                             tp2      : float,
-                             direction: str,
+                             entry     : float,
+                             current   : float,
+                             tp1       : float,
+                             tp2       : float,
+                             direction : str,
                              closed_tp1: bool = False) -> dict:
         try:
             if direction == "BUY":
@@ -619,8 +593,7 @@ class RiskManager:
 
     # ─── FULL RISK CHECK ────────────────────
 
-    def full_risk_check(self,
-                        current_balance: float) -> dict:
+    def full_risk_check(self, current_balance: float) -> dict:
         current_balance = self._get_effective_balance(
             current_balance
         )

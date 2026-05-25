@@ -1,5 +1,19 @@
 # ============================================
 # VORTEX BOT - FIBONACCI ENGINE
+# FIX v1.3b:
+#   - find_last_swing() tidak lagi silent return
+#     {"valid": False} tanpa log. Bug sebelumnya:
+#     kalau urutan swing tidak sesuai (swing_low
+#     terjadi SETELAH swing_high untuk BUY),
+#     fibonacci langsung invalid tanpa pesan apapun
+#     → bot skip diam-diam di Step 5 analyze_pair().
+#
+#   - Tambah fallback: kalau urutan swing tidak ideal,
+#     pakai N candle terakhir sebagai swing range
+#     daripada langsung invalid.
+#
+#   - Tambah logger.info di setiap return False
+#     supaya mudah dideteksi di Railway logs.
 # ============================================
 
 import pandas as pd
@@ -17,8 +31,15 @@ class FibonacciEngine:
                         direction: str,
                         lookback: int = 50) -> dict:
         """
-        Temukan swing high & low terakhir
-        untuk gambar fibonacci
+        Temukan swing high & low terakhir untuk fibonacci.
+
+        FIX v1.3b: Tambah fallback kalau urutan swing
+        tidak ideal. Sebelumnya langsung return invalid
+        tanpa log → bot skip diam-diam.
+
+        Fallback: pakai 20 candle terakhir sebagai
+        swing range (high max & low min) tanpa syarat
+        urutan index.
         """
         try:
             recent = df.tail(lookback)
@@ -27,9 +48,10 @@ class FibonacciEngine:
                 swing_low_idx  = recent["low"].idxmin()
                 swing_high_idx = recent["high"].idxmax()
 
-                swing_low  = recent.loc[swing_low_idx,  "low"]
-                swing_high = recent.loc[swing_high_idx, "high"]
+                swing_low  = float(recent.loc[swing_low_idx,  "low"])
+                swing_high = float(recent.loc[swing_high_idx, "high"])
 
+                # Urutan ideal: low dulu, baru high (upswing)
                 if swing_low_idx < swing_high_idx:
                     return {
                         "valid"      : True,
@@ -37,15 +59,44 @@ class FibonacciEngine:
                         "swing_start": swing_low,
                         "swing_end"  : swing_high,
                         "swing_range": swing_high - swing_low,
+                        "method"     : "ideal",
                     }
+
+                # FIX: Fallback — urutan tidak ideal tapi masih bisa pakai
+                # range high-low sebagai basis fibonacci
+                logger.debug(
+                    f"📐 Fib BUY swing urutan tidak ideal "
+                    f"(low_idx={swing_low_idx} > high_idx={swing_high_idx}) "
+                    f"→ fallback 20 candle"
+                )
+                fallback = df.tail(20)
+                fb_low   = float(fallback["low"].min())
+                fb_high  = float(fallback["high"].max())
+                fb_range = fb_high - fb_low
+
+                if fb_range <= 0:
+                    logger.info(
+                        f"⏭️ Fib BUY: range=0 di fallback → skip"
+                    )
+                    return {"valid": False}
+
+                return {
+                    "valid"      : True,
+                    "direction"  : "BUY",
+                    "swing_start": fb_low,
+                    "swing_end"  : fb_high,
+                    "swing_range": fb_range,
+                    "method"     : "fallback",
+                }
 
             elif direction == "SELL":
                 swing_high_idx = recent["high"].idxmax()
                 swing_low_idx  = recent["low"].idxmin()
 
-                swing_high = recent.loc[swing_high_idx, "high"]
-                swing_low  = recent.loc[swing_low_idx,  "low"]
+                swing_high = float(recent.loc[swing_high_idx, "high"])
+                swing_low  = float(recent.loc[swing_low_idx,  "low"])
 
+                # Urutan ideal: high dulu, baru low (downswing)
                 if swing_high_idx < swing_low_idx:
                     return {
                         "valid"      : True,
@@ -53,8 +104,36 @@ class FibonacciEngine:
                         "swing_start": swing_high,
                         "swing_end"  : swing_low,
                         "swing_range": swing_high - swing_low,
+                        "method"     : "ideal",
                     }
 
+                # FIX: Fallback
+                logger.debug(
+                    f"📐 Fib SELL swing urutan tidak ideal "
+                    f"(high_idx={swing_high_idx} > low_idx={swing_low_idx}) "
+                    f"→ fallback 20 candle"
+                )
+                fallback = df.tail(20)
+                fb_high  = float(fallback["high"].max())
+                fb_low   = float(fallback["low"].min())
+                fb_range = fb_high - fb_low
+
+                if fb_range <= 0:
+                    logger.info(
+                        f"⏭️ Fib SELL: range=0 di fallback → skip"
+                    )
+                    return {"valid": False}
+
+                return {
+                    "valid"      : True,
+                    "direction"  : "SELL",
+                    "swing_start": fb_high,
+                    "swing_end"  : fb_low,
+                    "swing_range": fb_range,
+                    "method"     : "fallback",
+                }
+
+            logger.info(f"⏭️ Fib: direction tidak dikenal → skip")
             return {"valid": False}
 
         except Exception as e:
@@ -65,10 +144,7 @@ class FibonacciEngine:
 
     def calculate_levels(self, df: pd.DataFrame,
                          direction: str) -> dict:
-        """
-        Hitung semua level Fibonacci
-        Retracement & Extension
-        """
+        """Hitung semua level Fibonacci retracement & extension."""
         try:
             swing = self.find_last_swing(df, direction)
 
@@ -78,6 +154,12 @@ class FibonacciEngine:
             start  = swing["swing_start"]
             end    = swing["swing_end"]
             range_ = swing["swing_range"]
+
+            if range_ <= 0:
+                logger.info(
+                    f"⏭️ Fib: swing range={range_:.4f} ≤ 0 → skip"
+                )
+                return {"valid": False}
 
             if direction == "BUY":
                 retracement = {
@@ -129,6 +211,7 @@ class FibonacciEngine:
                 "tp1"    : extension["1.272"],
                 "tp2"    : extension["1.618"],
                 "tp3"    : extension["2.618"],
+                "method" : swing.get("method", "ideal"),
             }
 
         except Exception as e:
@@ -140,9 +223,8 @@ class FibonacciEngine:
     def get_nearest_fib_level(self,
                                price: float,
                                fib_levels: dict,
-                               tolerance_pct: float = 1.0
-                               ) -> dict:
-        """Cek level fibonacci terdekat dengan harga"""
+                               tolerance_pct: float = 1.0) -> dict:
+        """Cek level fibonacci terdekat dengan harga."""
         try:
             retracement = fib_levels.get("retracement", {})
             tolerance   = price * (tolerance_pct / 100)
@@ -201,32 +283,25 @@ class FibonacciEngine:
                         direction: str,
                         atr: float,
                         fib_levels: dict,
-                        liquidity_level: float = None
-                        ) -> dict:
+                        liquidity_level: float = None) -> dict:
         """
-        Hitung SL & TP berdasarkan:
-        - Fibonacci extension untuk TP
-        - ATR dynamic untuk SL
-
-        UPDATE: ATR multiplier naik dari 1.5 → 2.0
-        Alasan: SL 1.5× ATR terlalu ketat untuk crypto,
-        sering kena noise sebelum harga balik. Dengan 2.0×,
-        SL lebih realistis (~2-3% untuk BTC/ETH di 15m/1h).
-
-        Guideline per timeframe:
-          15M → SL ≈ 2.0× ATR  (~1.5–2.5%)
-          1H  → SL ≈ 2.0× ATR  (~2–3%)
-          4H  → SL ≈ 2.0× ATR  (~3–5%)
+        Hitung SL & TP berdasarkan Fibonacci extension
+        dan ATR dynamic 2.0x.
         """
         try:
             if not fib_levels.get("valid"):
+                return {}
+
+            if atr <= 0:
+                logger.info(
+                    f"⏭️ Fib TP/SL: ATR={atr} ≤ 0 → skip"
+                )
                 return {}
 
             tp1 = fib_levels["tp1"]
             tp2 = fib_levels["tp2"]
             tp3 = fib_levels["tp3"]
 
-            # ── UPDATE: multiplier 1.5 → 2.0 ─────────────────────────────────
             atr_multiplier = 2.0
 
             if direction == "BUY":
@@ -238,9 +313,15 @@ class FibonacciEngine:
                     sl = sl_atr
 
                 risk = entry - sl
-                rr1  = (tp1 - entry) / risk if risk > 0 else 0
-                rr2  = (tp2 - entry) / risk if risk > 0 else 0
-                rr3  = (tp3 - entry) / risk if risk > 0 else 0
+                if risk <= 0:
+                    logger.info(
+                        f"⏭️ Fib BUY: risk={risk:.4f} ≤ 0 → skip"
+                    )
+                    return {}
+
+                rr1 = (tp1 - entry) / risk
+                rr2 = (tp2 - entry) / risk
+                rr3 = (tp3 - entry) / risk
 
                 if rr2 < cfg.MIN_RR:
                     tp2 = entry + (risk * cfg.MIN_RR)
@@ -255,9 +336,15 @@ class FibonacciEngine:
                     sl = sl_atr
 
                 risk = sl - entry
-                rr1  = (entry - tp1) / risk if risk > 0 else 0
-                rr2  = (entry - tp2) / risk if risk > 0 else 0
-                rr3  = (entry - tp3) / risk if risk > 0 else 0
+                if risk <= 0:
+                    logger.info(
+                        f"⏭️ Fib SELL: risk={risk:.4f} ≤ 0 → skip"
+                    )
+                    return {}
+
+                rr1 = (entry - tp1) / risk
+                rr2 = (entry - tp2) / risk
+                rr3 = (entry - tp3) / risk
 
                 if rr2 < cfg.MIN_RR:
                     tp2 = entry - (risk * cfg.MIN_RR)
@@ -271,18 +358,18 @@ class FibonacciEngine:
             )
 
             return {
-                "entry"      : entry,
-                "sl"         : round(sl,  4),
-                "tp1"        : round(tp1, 4),
-                "tp2"        : round(tp2, 4),
-                "tp3"        : round(tp3, 4),
-                "risk"       : round(risk, 4),
-                "sl_pct"     : round(sl_pct, 2),
-                "rr1"        : round(rr1, 2),
-                "rr2"        : round(rr2, 2),
-                "rr3"        : round(rr3, 2),
-                "sl_type"    : "Dynamic ATR 2.0x + Liquidity",
-                "atr_mult"   : atr_multiplier,
+                "entry"  : entry,
+                "sl"     : round(sl,  4),
+                "tp1"    : round(tp1, 4),
+                "tp2"    : round(tp2, 4),
+                "tp3"    : round(tp3, 4),
+                "risk"   : round(risk, 4),
+                "sl_pct" : round(sl_pct, 2),
+                "rr1"    : round(rr1, 2),
+                "rr2"    : round(rr2, 2),
+                "rr3"    : round(rr3, 2),
+                "sl_type": "Dynamic ATR 2.0x + Liquidity",
+                "atr_mult": atr_multiplier,
             }
 
         except Exception as e:
@@ -295,10 +382,7 @@ class FibonacciEngine:
                              df: pd.DataFrame,
                              tp_sl: dict,
                              direction: str) -> dict:
-        """
-        Sesuaikan RR dengan kondisi market.
-        Bot menyesuaikan TP jika ada momentum kuat.
-        """
+        """Sesuaikan RR dengan kondisi market."""
         try:
             if not tp_sl:
                 return tp_sl
@@ -313,32 +397,18 @@ class FibonacciEngine:
             entry = tp_sl["entry"]
             risk  = tp_sl["risk"]
 
-            if direction == "BUY":
-                if momentum > 2.0:
-                    tp_sl["active_tp"] = tp_sl["tp3"]
-                    tp_sl["active_rr"] = tp_sl["rr3"]
-                    tp_sl["momentum"]  = "STRONG"
-                elif momentum > 1.5:
-                    tp_sl["active_tp"] = tp_sl["tp2"]
-                    tp_sl["active_rr"] = tp_sl["rr2"]
-                    tp_sl["momentum"]  = "NORMAL"
-                else:
-                    tp_sl["active_tp"] = tp_sl["tp1"]
-                    tp_sl["active_rr"] = tp_sl["rr1"]
-                    tp_sl["momentum"]  = "WEAK"
+            if momentum > 2.0:
+                tp_sl["active_tp"] = tp_sl["tp3"]
+                tp_sl["active_rr"] = tp_sl["rr3"]
+                tp_sl["momentum"]  = "STRONG"
+            elif momentum > 1.5:
+                tp_sl["active_tp"] = tp_sl["tp2"]
+                tp_sl["active_rr"] = tp_sl["rr2"]
+                tp_sl["momentum"]  = "NORMAL"
             else:
-                if momentum > 2.0:
-                    tp_sl["active_tp"] = tp_sl["tp3"]
-                    tp_sl["active_rr"] = tp_sl["rr3"]
-                    tp_sl["momentum"]  = "STRONG"
-                elif momentum > 1.5:
-                    tp_sl["active_tp"] = tp_sl["tp2"]
-                    tp_sl["active_rr"] = tp_sl["rr2"]
-                    tp_sl["momentum"]  = "NORMAL"
-                else:
-                    tp_sl["active_tp"] = tp_sl["tp1"]
-                    tp_sl["active_rr"] = tp_sl["rr1"]
-                    tp_sl["momentum"]  = "WEAK"
+                tp_sl["active_tp"] = tp_sl["tp1"]
+                tp_sl["active_rr"] = tp_sl["rr1"]
+                tp_sl["momentum"]  = "WEAK"
 
             if tp_sl.get("active_rr", 0) < cfg.MIN_RR:
                 tp_sl["active_rr"] = cfg.MIN_RR
@@ -365,11 +435,20 @@ class FibonacciEngine:
                 current_price: float,
                 atr: float,
                 liquidity_level: float = None) -> dict:
-        """Full fibonacci analysis"""
+        """
+        Full fibonacci analysis.
+
+        FIX v1.3b: Tambah logger.info di setiap return
+        invalid supaya mudah dideteksi di logs.
+        """
         try:
             fib_levels = self.calculate_levels(df, direction)
 
             if not fib_levels.get("valid"):
+                logger.info(
+                    f"⏭️ Fib {direction}: levels invalid "
+                    f"(swing tidak terdeteksi) → skip"
+                )
                 return {
                     "valid"    : False,
                     "at_fib"   : False,
@@ -388,10 +467,27 @@ class FibonacciEngine:
                 liquidity_level = liquidity_level,
             )
 
-            if tp_sl:
-                tp_sl = self.adjust_rr_to_market(
-                    df, tp_sl, direction
+            if not tp_sl:
+                logger.info(
+                    f"⏭️ Fib {direction}: TP/SL calc gagal "
+                    f"(ATR={atr:.4f} atau risk≤0) → skip"
                 )
+                return {
+                    "valid"    : False,
+                    "at_fib"   : False,
+                    "fib_score": 0,
+                }
+
+            tp_sl = self.adjust_rr_to_market(df, tp_sl, direction)
+
+            method = fib_levels.get("method", "ideal")
+            logger.debug(
+                f"📐 Fib {direction} OK | "
+                f"method={method} | "
+                f"at_fib={nearest.get('at_fib')} "
+                f"level={nearest.get('level')} | "
+                f"rr2={tp_sl.get('rr2', 0):.2f}"
+            )
 
             return {
                 "valid"       : True,
@@ -407,12 +503,16 @@ class FibonacciEngine:
                 "tp1"         : fib_levels.get("tp1"),
                 "tp2"         : fib_levels.get("tp2"),
                 "tp3"         : fib_levels.get("tp3"),
+                "method"      : method,
             }
 
         except Exception as e:
             logger.error(f"❌ Fibonacci analyze error: {e}")
-            return {"valid": False, "at_fib": False,
-                    "fib_score": 0}
+            return {
+                "valid"    : False,
+                "at_fib"   : False,
+                "fib_score": 0,
+            }
 
 
 # Instance siap pakai

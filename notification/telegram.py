@@ -63,6 +63,101 @@ class TelegramNotifier:
             logger.error(f"❌ Telegram error: {e}")
             return False
 
+    def send_photo(self, image_path: str,
+                   caption: str = "") -> bool:
+        """Kirim foto/chart ke Telegram."""
+        if not self.enabled:
+            return False
+        try:
+            with open(image_path, 'rb') as photo:
+                resp = requests.post(
+                    f"{self.base_url}/sendPhoto",
+                    data={
+                        "chat_id" : self.chat_id,
+                        "caption" : caption[:1024] if caption else "",
+                        "parse_mode": "HTML",
+                    },
+                    files={"photo": photo},
+                    timeout=30,
+                )
+            if resp.status_code == 200:
+                logger.debug("📱 Telegram photo sent ✅")
+                return True
+            logger.error(
+                f"❌ Telegram photo {resp.status_code}: "
+                f"{resp.text[:100]}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"❌ Telegram photo error: {e}")
+            return False
+
+    # ─── BACKTEST RESULT ────────────────────
+
+    def send_backtest_summary(self, results: list,
+                               chart_path: str = None):
+        """
+        Kirim hasil backtest ke Telegram.
+        results = list of BacktestResult dari backtest_smc.py
+        chart_path = path ke backtest_result.png (opsional)
+        """
+        if not results:
+            self.send("⚠️ <b>Backtest selesai</b> — tidak ada hasil.")
+            return
+
+        lines = (
+            f"📊 <b>BACKTEST RESULT</b>\n"
+            f"{'='*35}\n"
+        )
+
+        for r in results:
+            status = "✅" if (
+                r.win_rate >= 0.45 and
+                r.profit_factor >= 1.5 and
+                r.max_drawdown > -0.20
+            ) else "⚠️"
+
+            sign = "+" if r.total_return >= 0 else ""
+            lines += (
+                f"\n{status} <b>{r.symbol}</b>\n"
+                f"  Trades  : {len(r.trades)}\n"
+                f"  Win Rate: <b>{r.win_rate:.1%}</b>\n"
+                f"  PF      : <b>{r.profit_factor:.2f}</b>\n"
+                f"  Max DD  : <b>{r.max_drawdown:.2%}</b>\n"
+                f"  Sharpe  : {r.sharpe_ratio:.2f}\n"
+                f"  Return  : <b>{sign}{r.total_return:.2%}</b>\n"
+            )
+
+            # Diagnosis otomatis
+            diag = []
+            if r.win_rate < 0.40:
+                diag.append("WR rendah → longgarkan stoch")
+            if r.profit_factor < 1.5:
+                diag.append("PF rendah → naikkan TP1 RR")
+            if r.max_drawdown < -0.20:
+                diag.append("DD tinggi → kurangi risk/trade")
+            if not diag:
+                diag.append("Siap dioptimasi lebih lanjut")
+
+            lines += f"  💡 {' | '.join(diag)}\n"
+
+        lines += f"\n{'='*35}\n⏰ {_wib_str()}"
+
+        # Kirim teks dulu
+        self.send(lines)
+
+        # Kirim chart kalau ada
+        if chart_path:
+            try:
+                import os
+                if os.path.exists(chart_path):
+                    self.send_photo(
+                        chart_path,
+                        caption="📈 Equity Curve — VortexBot Backtest"
+                    )
+            except Exception as e:
+                logger.error(f"❌ Send chart error: {e}")
+
     # ─── COMMAND POLLING ────────────────────
 
     def start_polling(self, bot_ref=None):
@@ -294,9 +389,9 @@ class TelegramNotifier:
                 )
 
             elif cmd == "/score":
-                # FIX: update ke max 23
+                # ── UPDATED: max score 24 ──
                 min_s  = cfg.MIN_CONFLUENCE_SCORE
-                max_s  = 23
+                max_s  = 24
                 phases = (
                     f"  Demo P1 : 10/{max_s}\n"
                     f"  Demo P2 : 13/{max_s}\n"
@@ -310,7 +405,7 @@ class TelegramNotifier:
                     f"<b>Phase guide:</b>\n"
                     f"{phases}\n"
                     f"{'='*32}\n"
-                    f"<b>Breakdown 20 poin:</b>\n"
+                    f"<b>Breakdown {max_s} poin:</b>\n"
                     f"  EMA align    : 1\n"
                     f"  Stoch(5,3,3) : 2\n"
                     f"  Volume       : 1\n"
@@ -326,8 +421,9 @@ class TelegramNotifier:
                     f"  Fib 0.500    : 1\n"
                     f"  Killzone     : 1\n"
                     f"  News clear   : 1\n"
+                    f"  [+1 upgrade] : 1\n"
                     f"{'='*32}\n"
-                    f"Ubah di Railway: MIN_CONFLUENCE_SCORE=10"
+                    f"Ubah di Railway: MIN_CONFLUENCE_SCORE=11"
                 )
 
             elif cmd == "/strategy":
@@ -439,7 +535,7 @@ class TelegramNotifier:
             f"  Breakout/Pullback + ATR 2.0x SL\n"
             f"  VWAP: {vwap_str} | Funding: {funding_str}\n"
             f"{'='*35}\n"
-            f"🎯 Min Score : <b>{cfg.MIN_CONFLUENCE_SCORE}/23</b>\n"
+            f"🎯 Min Score : <b>{cfg.MIN_CONFLUENCE_SCORE}/24</b>\n"
             f"⏰ Killzone  : London & New York\n"
             f"{'='*35}\n"
             f"🤖 Bot monitoring market...\n"
@@ -529,13 +625,6 @@ class TelegramNotifier:
     # ─── SIGNAL DETECTED ────────────────────
 
     def send_signal_detected(self, signal: dict):
-        """
-        Upgrade v1.1:
-        - Score tampil /20
-        - Tambah Stochastic info
-        - Tambah BP mode (Breakout/Pullback)
-        - Tambah SL% dan VWAP/Funding info
-        """
         pair      = signal.get("pair", "")
         direction = signal.get("direction", "")
         score     = signal.get("confluence_score", 0)
@@ -546,7 +635,6 @@ class TelegramNotifier:
         sl_pct    = signal.get("sl_pct", 0)
         dir_emoji = "🟢 LONG" if direction == "BUY" else "🔴 SHORT"
 
-        # Stochastic info
         stoch_k    = signal.get("stoch_k", 0)
         stoch_d    = signal.get("stoch_d", 0)
         stoch_zone = signal.get("stoch_zone", "neutral")
@@ -556,7 +644,6 @@ class TelegramNotifier:
             "➡️"
         )
 
-        # BP mode display
         bp_map = {
             "BREAKOUT_RETEST": "🚀 Breakout Retest",
             "BREAKOUT_WAIT"  : "⏳ Breakout (wait)",
@@ -565,7 +652,6 @@ class TelegramNotifier:
         }
         bp_str = bp_map.get(bp_mode, bp_mode)
 
-        # VWAP info
         vwap_side = signal.get("vwap_side", "")
         vwap_str  = ""
         if vwap_side:
@@ -575,7 +661,6 @@ class TelegramNotifier:
                 f"{'Discount' if vwap_side == 'below' else 'Premium'}\n"
             )
 
-        # Funding rate info
         funding_rate = signal.get("funding_rate")
         funding_str  = ""
         if funding_rate is not None:
@@ -584,7 +669,6 @@ class TelegramNotifier:
                 f"Funding  : {f_emoji} {funding_rate:+.4f}%\n"
             )
 
-        # Top reasons (hanya yang ✅)
         reasons      = signal.get("top_reasons", [])
         reasons_text = ""
         ok_reasons   = [r for r in reasons if "✅" in str(r)]
@@ -596,7 +680,7 @@ class TelegramNotifier:
             f"{'='*35}\n"
             f"📊 <b>{pair}</b> — {dir_emoji}\n"
             f"{'='*35}\n"
-            f"Score    : <b>{score}/20 ({grade})</b>\n"
+            f"Score    : <b>{score}/24 ({grade})</b>\n"
             f"Session  : <b>{session}</b>\n"
             f"Mode     : <b>{bp_str}</b>\n"
             f"Fib      : <b>{fib}</b>\n"
@@ -616,13 +700,6 @@ class TelegramNotifier:
     # ─── TRADE OPENED ───────────────────────
 
     def send_trade_opened(self, trade: dict):
-        """
-        Upgrade v1.1:
-        - Score /20
-        - Tampil SL% dari entry
-        - Tampil BP mode
-        - Tampil sl_type (ATR 2.0x)
-        """
         pair      = trade.get("pair", "")
         direction = trade.get("direction", "")
         entry     = trade.get("entry_price", 0)
@@ -667,7 +744,7 @@ class TelegramNotifier:
             f"⚙️ Lev   : <b>{lev}x</b>\n"
             f"⚠️ Risk  : <b>${risk_amt:.4f}</b>\n"
             f"📊 RR    : <b>1:{rr2:.1f}</b>\n"
-            f"🏆 Score : <b>{score}/20</b>\n"
+            f"🏆 Score : <b>{score}/24</b>\n"
             f"💼 Mode  : <b>{mode}</b>\n"
             f"{'='*35}\n"
             f"⏰ {_wib_str()}"
@@ -720,7 +797,7 @@ class TelegramNotifier:
             f"💰 PnL     : <b>{sign}${pnl:.4f}</b>\n"
             f"📊 RR      : <b>1:{rr:.2f}</b>\n"
             f"⏱️ Durasi : <b>{hours}j {mins}m</b>\n"
-            f"🏆 Score  : {score}/20\n"
+            f"🏆 Score  : {score}/24\n"
             f"{'='*35}\n"
             f"💼 Balance : <b>${balance:.4f}</b>\n"
             f"⏰ {_wib_str()}"
@@ -752,7 +829,6 @@ class TelegramNotifier:
                                vwap_side: str,
                                price: float,
                                vwap: float):
-        """Notif kalau signal di-skip karena VWAP filter"""
         side_str = "di atas" if vwap_side == "above" else "di bawah"
         issue    = (
             "SELL di discount zone"
@@ -777,7 +853,6 @@ class TelegramNotifier:
     def send_funding_filter_skip(self, pair: str,
                                   direction: str,
                                   funding_rate: float):
-        """Notif kalau signal di-skip karena funding rate ekstrem"""
         if funding_rate > 0:
             issue = f"Funding sangat positif ({funding_rate:+.4f}%) — longs overpaying"
         else:
@@ -877,7 +952,7 @@ class TelegramNotifier:
             f"{'='*35}\n"
             f"💰 Balance  : <b>${balance:.4f}</b>\n"
             f"🌍 Market   : <b>{regime_text}</b>\n"
-            f"🎯 Min Score: <b>{cfg.MIN_CONFLUENCE_SCORE}/20</b>\n"
+            f"🎯 Min Score: <b>{cfg.MIN_CONFLUENCE_SCORE}/24</b>\n"
             f"VWAP Filter : {vwap_str}\n"
             f"Funding Flt : {funding_str}\n"
             f"{news_text}"
@@ -959,7 +1034,7 @@ class TelegramNotifier:
             f"⏱️ Uptime : <b>{uptime:.1f} jam</b>\n"
             f"💰 Balance : <b>${balance:.4f}</b>\n"
             f"📊 Open    : <b>{open_trades} trade(s)</b>\n"
-            f"🎯 Score   : min {cfg.MIN_CONFLUENCE_SCORE}/23\n"
+            f"🎯 Score   : min {cfg.MIN_CONFLUENCE_SCORE}/24\n"
             f"{'='*35}\n"
             f"🤖 Semua sistem normal!\n"
             f"⏰ {_wib_str()}"

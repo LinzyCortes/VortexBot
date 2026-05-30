@@ -5,20 +5,25 @@ Filters: Stoch 5,3,3 · EMA 13/21 · VWAP · Killzone London/NY
 Risk: SL 2×ATR · Partial TP 30/40/30 · Trailing stop · SL cooldown 2j
 
 Cara jalankan:
-    pip install ccxt pandas numpy matplotlib
+    pip install ccxt pandas numpy matplotlib requests
     python backtest/backtest_smc.py
 """
 
+import os
+import sys
 import ccxt
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # non-interactive, aman di Railway
 import matplotlib.pyplot as plt
 import time
+import requests
 from dataclasses import dataclass, field
 from typing import Optional
 
 # ─────────────────────────────────────────────────────────────
-# PAIRS — tambah/hapus di sini, tidak perlu ubah file lain
+# PAIRS — tambah/hapus di sini saja, tidak perlu ubah yang lain
 # ─────────────────────────────────────────────────────────────
 PAIRS = [
     'BTC/USDT:USDT',
@@ -31,26 +36,75 @@ PAIRS = [
 exchange = ccxt.okx({
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',   # perpetual futures
+        'defaultType': 'swap',  # perpetual futures
     }
 })
 
 # ─────────────────────────────────────────────────────────────
+# CONFIG TELEGRAM — ambil otomatis dari environment Railway
+# ─────────────────────────────────────────────────────────────
+TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN', '')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
+
+def _tg_send(message: str) -> bool:
+    """Kirim pesan teks ke Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("  [Telegram] Token/Chat ID tidak ditemukan, skip notif.")
+        return False
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={
+                "chat_id"   : TELEGRAM_CHAT_ID,
+                "text"      : message[:4090],
+                "parse_mode": "HTML",
+            },
+            timeout=10,
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"  [Telegram] Error kirim pesan: {e}")
+        return False
+
+def _tg_send_photo(image_path: str, caption: str = "") -> bool:
+    """Kirim foto/chart ke Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    if not os.path.exists(image_path):
+        print(f"  [Telegram] File chart tidak ditemukan: {image_path}")
+        return False
+    try:
+        with open(image_path, 'rb') as photo:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                data={
+                    "chat_id"    : TELEGRAM_CHAT_ID,
+                    "caption"    : caption[:1024],
+                    "parse_mode" : "HTML",
+                },
+                files={"photo": photo},
+                timeout=30,
+            )
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"  [Telegram] Error kirim chart: {e}")
+        return False
+
+# ─────────────────────────────────────────────────────────────
 # CONFIG STRATEGI
 # ─────────────────────────────────────────────────────────────
-INITIAL_CAPITAL = 100        # USD — modal awal demo
-RISK_PER_TRADE  = 0.01       # 1% risk per trade
-ATR_SL_MULT     = 2.0        # SL = 2x ATR
-TP_RATIOS       = [0.30, 0.40, 0.30]   # partial close 30/40/30
-TP_RR           = [1.5,  2.5,  4.0]   # R:R tiap TP
-COOLDOWN_BARS   = 8          # ~2 jam di 15M setelah SL hit
+INITIAL_CAPITAL = 100
+RISK_PER_TRADE  = 0.01       # 1% per trade
+ATR_SL_MULT     = 2.0
+TP_RATIOS       = [0.30, 0.40, 0.30]
+TP_RR           = [1.5,  2.5,  4.0]
+COOLDOWN_BARS   = 8          # ~2 jam di 15M
 EMA_FAST        = 13
 EMA_SLOW        = 21
 STOCH_K         = 5
 STOCH_D         = 3
 STOCH_SMOOTH    = 3
 
-# Killzone UTC (London 07-10, NY 12-15)
 LONDON_HOURS = list(range(7, 11))
 NY_HOURS     = list(range(12, 16))
 
@@ -85,15 +139,17 @@ class BacktestResult:
 # ─────────────────────────────────────────────────────────────
 # FETCH DATA
 # ─────────────────────────────────────────────────────────────
-def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
-    """Fetch data historis OHLCV dari OKX (public, tanpa API key)."""
+def fetch_ohlcv(symbol: str, timeframe: str,
+                limit: int = 1000) -> pd.DataFrame:
     print(f"  Fetching {symbol} {timeframe} ({limit} bars)...")
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+        df = pd.DataFrame(
+            bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume']
+        )
         df['timestamp'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
         df = df.drop(columns='ts').reset_index(drop=True)
-        time.sleep(0.3)   # hindari rate limit
+        time.sleep(0.3)
         return df
     except Exception as e:
         print(f"  ERROR fetch {symbol} {timeframe}: {e}")
@@ -103,11 +159,11 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 1000) -> pd.DataFrame:
 # INDIKATOR
 # ─────────────────────────────────────────────────────────────
 def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high, low, close = df['high'], df['low'], df['close']
+    h, l, c = df['high'], df['low'], df['close']
     tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low  - close.shift()).abs()
+        h - l,
+        (h - c.shift()).abs(),
+        (l - c.shift()).abs()
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
@@ -123,15 +179,15 @@ def calc_stochastic(df: pd.DataFrame, k=5, d=3, smooth=3):
     return stk, std
 
 def calc_vwap(df: pd.DataFrame) -> pd.Series:
-    typical = (df['high'] + df['low'] + df['close']) / 3
-    return (typical * df['volume']).cumsum() / df['volume'].cumsum()
+    tp = (df['high'] + df['low'] + df['close']) / 3
+    return (tp * df['volume']).cumsum() / df['volume'].cumsum()
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df['atr']        = calc_atr(df)
-    df['ema13']      = calc_ema(df['close'], EMA_FAST)
-    df['ema21']      = calc_ema(df['close'], EMA_SLOW)
-    df['vwap']       = calc_vwap(df)
+    df['atr']          = calc_atr(df)
+    df['ema13']        = calc_ema(df['close'], EMA_FAST)
+    df['ema21']        = calc_ema(df['close'], EMA_SLOW)
+    df['vwap']         = calc_vwap(df)
     df['stk'], df['std'] = calc_stochastic(df, STOCH_K, STOCH_D, STOCH_SMOOTH)
     return df
 
@@ -142,20 +198,20 @@ def detect_swing_highs_lows(df: pd.DataFrame, lookback: int = 5):
     sh = pd.Series(False, index=df.index)
     sl = pd.Series(False, index=df.index)
     for i in range(lookback, len(df) - lookback):
-        window_h = df['high'].iloc[i - lookback: i + lookback + 1]
-        window_l = df['low'].iloc[i  - lookback: i + lookback + 1]
-        if df['high'].iloc[i] == window_h.max():
+        wh = df['high'].iloc[i - lookback: i + lookback + 1]
+        wl = df['low'].iloc[i  - lookback: i + lookback + 1]
+        if df['high'].iloc[i] == wh.max():
             sh.iloc[i] = True
-        if df['low'].iloc[i] == window_l.min():
+        if df['low'].iloc[i] == wl.min():
             sl.iloc[i] = True
     return sh, sl
 
 def detect_bos_choch(df, sh, sl):
     n = len(df)
-    bull_bos  = pd.Series(False, index=df.index)
-    bear_bos  = pd.Series(False, index=df.index)
-    choch_b   = pd.Series(False, index=df.index)
-    choch_s   = pd.Series(False, index=df.index)
+    bull_bos = pd.Series(False, index=df.index)
+    bear_bos = pd.Series(False, index=df.index)
+    choch_b  = pd.Series(False, index=df.index)
+    choch_s  = pd.Series(False, index=df.index)
     last_sh, last_sl, trend = None, None, None
 
     for i in range(1, n):
@@ -177,12 +233,22 @@ def detect_order_blocks(df, sh, sl, lookback=3):
         if sh.iloc[i]:
             for j in range(i-1, max(i-lookback-1, 0), -1):
                 if df['close'].iloc[j] < df['open'].iloc[j]:
-                    obs.append({'type':'bullish','high':df['high'].iloc[j],'low':df['low'].iloc[j],'bar_idx':j})
+                    obs.append({
+                        'type': 'bullish',
+                        'high': df['high'].iloc[j],
+                        'low' : df['low'].iloc[j],
+                        'bar_idx': j
+                    })
                     break
         if sl.iloc[i]:
             for j in range(i-1, max(i-lookback-1, 0), -1):
                 if df['close'].iloc[j] > df['open'].iloc[j]:
-                    obs.append({'type':'bearish','high':df['high'].iloc[j],'low':df['low'].iloc[j],'bar_idx':j})
+                    obs.append({
+                        'type': 'bearish',
+                        'high': df['high'].iloc[j],
+                        'low' : df['low'].iloc[j],
+                        'bar_idx': j
+                    })
                     break
     return obs
 
@@ -190,17 +256,26 @@ def detect_fvg(df):
     fvgs = []
     for i in range(2, len(df)):
         if df['low'].iloc[i] > df['high'].iloc[i-2]:
-            fvgs.append({'type':'bullish','top':df['low'].iloc[i],'bottom':df['high'].iloc[i-2],'bar_idx':i})
+            fvgs.append({
+                'type'   : 'bullish',
+                'top'    : df['low'].iloc[i],
+                'bottom' : df['high'].iloc[i-2],
+                'bar_idx': i
+            })
         if df['high'].iloc[i] < df['low'].iloc[i-2]:
-            fvgs.append({'type':'bearish','top':df['low'].iloc[i-2],'bottom':df['high'].iloc[i],'bar_idx':i})
+            fvgs.append({
+                'type'   : 'bearish',
+                'top'    : df['low'].iloc[i-2],
+                'bottom' : df['high'].iloc[i],
+                'bar_idx': i
+            })
     return fvgs
 
 # ─────────────────────────────────────────────────────────────
 # HELPER FILTER
 # ─────────────────────────────────────────────────────────────
 def is_killzone(ts) -> bool:
-    h = ts.hour
-    return h in LONDON_HOURS or h in NY_HOURS
+    return ts.hour in LONDON_HOURS or ts.hour in NY_HOURS
 
 def get_4h_bias(df_4h, ts):
     mask = df_4h['timestamp'] <= ts
@@ -237,12 +312,10 @@ def run_backtest(symbol: str,
                  df_1h:  pd.DataFrame,
                  df_4h:  pd.DataFrame) -> BacktestResult:
 
-    # Tambah indikator semua TF
     df_15m = add_indicators(df_15m)
     df_1h  = add_indicators(df_1h)
     df_4h  = add_indicators(df_4h)
 
-    # SMC detection di 1H
     sh_1h, sl_1h = detect_swing_highs_lows(df_1h)
     obs  = detect_order_blocks(df_1h, sh_1h, sl_1h)
     fvgs = detect_fvg(df_1h)
@@ -267,14 +340,16 @@ def run_backtest(symbol: str,
 
         # ── Update open trade (SL/TP check)
         if open_trade and open_trade.is_open:
-            t   = open_trade
-            sl  = t.trailing_sl if t.trailing_sl else t.sl_price
+            t  = open_trade
+            sl = t.trailing_sl if t.trailing_sl else t.sl_price
+
             hit_sl = (t.direction == 'long'  and low  <= sl) or \
                      (t.direction == 'short' and high >= sl)
 
             if hit_sl:
                 remaining = sum(
-                    TP_RATIOS[k] for k in range(3) if not t.partial_closed[k]
+                    TP_RATIOS[k] for k in range(3)
+                    if not t.partial_closed[k]
                 ) * t.size
                 pnl_move = (sl - t.entry_price) if t.direction == 'long' \
                            else (t.entry_price - sl)
@@ -295,12 +370,12 @@ def run_backtest(symbol: str,
                         partial_size = TP_RATIOS[k] * t.size
                         pnl_move     = (tp - t.entry_price) if t.direction == 'long' \
                                        else (t.entry_price - tp)
-                        t.pnl             += (pnl_move / t.entry_price) * partial_size
+                        t.pnl              += (pnl_move / t.entry_price) * partial_size
                         t.partial_closed[k] = True
                         if k == 0:
-                            t.trailing_sl = t.entry_price       # BE setelah TP1
+                            t.trailing_sl = t.entry_price
                         elif k == 1:
-                            t.trailing_sl = t.tp_prices[0]      # lock TP1 setelah TP2
+                            t.trailing_sl = t.tp_prices[0]
 
                 if all(t.partial_closed):
                     t.is_open     = False
@@ -309,7 +384,6 @@ def run_backtest(symbol: str,
                     trades.append(t)
                     open_trade    = None
 
-        # ── Skip jika cooldown / ada trade terbuka
         if cooldown_bars > 0:
             cooldown_bars -= 1
             equity_curve.append(capital)
@@ -335,7 +409,7 @@ def run_backtest(symbol: str,
         if mask_1h.sum() == 0:
             equity_curve.append(capital)
             continue
-        r1h = df_1h[mask_1h].iloc[-1]
+        r1h    = df_1h[mask_1h].iloc[-1]
         ema_ok = (bias == 'bullish' and r1h['ema13'] > r1h['ema21']) or \
                  (bias == 'bearish' and r1h['ema13'] < r1h['ema21'])
         if not ema_ok:
@@ -374,20 +448,17 @@ def run_backtest(symbol: str,
             continue
 
         # ── SMC: cek OB atau FVG
-        i_1h   = int(mask_1h.sum()) - 1
-        ob     = get_ob_nearby(obs,  close, bias, i_1h)
-        fvg    = get_fvg_nearby(fvgs, close, bias, i_1h)
+        i_1h = int(mask_1h.sum()) - 1
+        ob   = get_ob_nearby(obs,  close, bias, i_1h)
+        fvg  = get_fvg_nearby(fvgs, close, bias, i_1h)
         if ob is None and fvg is None:
             equity_curve.append(capital)
             continue
 
         # ── Hitung SL, TP, size
-        if bias == 'bullish':
-            sl_price = close - ATR_SL_MULT * atr
-        else:
-            sl_price = close + ATR_SL_MULT * atr
-
-        sl_dist = abs(close - sl_price)
+        sl_price = (close - ATR_SL_MULT * atr) if bias == 'bullish' \
+                   else (close + ATR_SL_MULT * atr)
+        sl_dist  = abs(close - sl_price)
         if sl_dist < 1e-9:
             equity_curve.append(capital)
             continue
@@ -397,9 +468,8 @@ def run_backtest(symbol: str,
             for rr in TP_RR
         ]
 
-        risk_usd = capital * RISK_PER_TRADE
-        size     = risk_usd / (sl_dist / close)
-
+        risk_usd   = capital * RISK_PER_TRADE
+        size       = risk_usd / (sl_dist / close)
         open_trade = Trade(
             direction   = 'long' if bias == 'bullish' else 'short',
             entry_price = close,
@@ -413,9 +483,9 @@ def run_backtest(symbol: str,
 
     # Close trade yang masih open di akhir data
     if open_trade and open_trade.is_open:
-        last = df_15m['close'].iloc[-1]
-        pm   = (last - open_trade.entry_price) if open_trade.direction == 'long' \
-               else (open_trade.entry_price - last)
+        last     = df_15m['close'].iloc[-1]
+        pm       = (last - open_trade.entry_price) if open_trade.direction == 'long' \
+                   else (open_trade.entry_price - last)
         open_trade.pnl        = (pm / open_trade.entry_price) * open_trade.size
         open_trade.is_open    = False
         open_trade.exit_reason = 'END_OF_DATA'
@@ -425,27 +495,31 @@ def run_backtest(symbol: str,
     return _compute_stats(symbol, trades, equity_curve)
 
 # ─────────────────────────────────────────────────────────────
-# STATISTIK & PRINT
+# STATISTIK
 # ─────────────────────────────────────────────────────────────
 def _compute_stats(symbol, trades, equity_curve) -> BacktestResult:
     if not trades:
-        print(f"  {symbol}: tidak ada trade yang terjadi.")
-        return BacktestResult(symbol=symbol, trades=[], equity_curve=equity_curve)
+        print(f"  {symbol}: tidak ada trade.")
+        return BacktestResult(
+            symbol=symbol, trades=[], equity_curve=equity_curve
+        )
 
-    wins  = [t for t in trades if t.pnl > 0]
-    loss  = [t for t in trades if t.pnl <= 0]
-    wr    = len(wins) / len(trades)
-    gp    = sum(t.pnl for t in wins)
-    gl    = abs(sum(t.pnl for t in loss))
-    pf    = gp / gl if gl > 0 else float('inf')
+    wins = [t for t in trades if t.pnl > 0]
+    loss = [t for t in trades if t.pnl <= 0]
+    wr   = len(wins) / len(trades)
+    gp   = sum(t.pnl for t in wins)
+    gl   = abs(sum(t.pnl for t in loss))
+    pf   = gp / gl if gl > 0 else float('inf')
 
-    eq         = pd.Series(equity_curve)
-    dd         = (eq - eq.cummax()) / eq.cummax()
-    max_dd     = dd.min()
-    ret        = eq.pct_change().dropna()
-    sharpe     = (ret.mean() / ret.std() * np.sqrt(252 * 96)) if ret.std() > 0 else 0
-    total_ret  = (equity_curve[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL
+    eq        = pd.Series(equity_curve)
+    dd        = (eq - eq.cummax()) / eq.cummax()
+    max_dd    = dd.min()
+    ret       = eq.pct_change().dropna()
+    sharpe    = (ret.mean() / ret.std() * np.sqrt(252 * 96)) \
+                if ret.std() > 0 else 0
+    total_ret = (equity_curve[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL
 
+    # Print ke terminal
     print(f"\n{'─'*50}")
     print(f"  {symbol}")
     print(f"{'─'*50}")
@@ -457,16 +531,16 @@ def _compute_stats(symbol, trades, equity_curve) -> BacktestResult:
     print(f"  Total Return   : {total_ret:+.2%}")
     print(f"  Final Capital  : ${equity_curve[-1]:.2f}")
 
-    # Saran otomatis berdasarkan hasil
+    # Diagnosis otomatis
     print(f"\n  💡 Diagnosis:")
     if wr < 0.40:
-        print("     Win rate < 40% → coba longgarkan stoch threshold ke 35/65")
+        print("     Win rate < 40% → longgarkan stoch threshold ke 35/65")
     if pf < 1.5:
-        print("     Profit Factor < 1.5 → pertimbangkan naikkan TP1 R:R ke 2.0")
+        print("     Profit Factor < 1.5 → naikkan TP1 R:R ke 2.0")
     if max_dd < -0.20:
-        print("     Drawdown > 20% → kurangi RISK_PER_TRADE ke 0.005 (0.5%)")
+        print("     Drawdown > 20% → kurangi RISK_PER_TRADE ke 0.005")
     if wr >= 0.45 and pf >= 1.5 and max_dd > -0.15:
-        print("     ✅ Hasil bagus! Siap lanjut optimize atau naikkan modal sedikit.")
+        print("     ✅ Hasil bagus! Siap lanjut optimize.")
 
     return BacktestResult(
         symbol        = symbol,
@@ -482,8 +556,9 @@ def _compute_stats(symbol, trades, equity_curve) -> BacktestResult:
 # ─────────────────────────────────────────────────────────────
 # PLOT EQUITY CURVE
 # ─────────────────────────────────────────────────────────────
-def plot_results(results: list):
-    n = len(results)
+def plot_results(results: list) -> str:
+    """Buat chart equity curve, return path file PNG."""
+    n    = len(results)
     fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n))
     if n == 1:
         axes = [axes]
@@ -491,14 +566,25 @@ def plot_results(results: list):
     for ax, r in zip(axes, results):
         eq = pd.Series(r.equity_curve)
         ax.plot(eq.values, color='#2196F3', linewidth=1.5, label='Equity')
-        ax.axhline(INITIAL_CAPITAL, color='gray', linewidth=0.8, linestyle='--', label='Modal awal')
-        ax.fill_between(range(len(eq)), INITIAL_CAPITAL, eq.values,
-                        where=eq.values >= INITIAL_CAPITAL, alpha=0.15, color='#4CAF50')
-        ax.fill_between(range(len(eq)), INITIAL_CAPITAL, eq.values,
-                        where=eq.values <  INITIAL_CAPITAL, alpha=0.15, color='#F44336')
+        ax.axhline(
+            INITIAL_CAPITAL, color='gray',
+            linewidth=0.8, linestyle='--', label='Modal awal'
+        )
+        ax.fill_between(
+            range(len(eq)), INITIAL_CAPITAL, eq.values,
+            where=eq.values >= INITIAL_CAPITAL,
+            alpha=0.15, color='#4CAF50'
+        )
+        ax.fill_between(
+            range(len(eq)), INITIAL_CAPITAL, eq.values,
+            where=eq.values < INITIAL_CAPITAL,
+            alpha=0.15, color='#F44336'
+        )
         ax.set_title(
-            f"{r.symbol}  |  WR: {r.win_rate:.1%}  PF: {r.profit_factor:.2f}  "
-            f"DD: {r.max_drawdown:.2%}  Return: {r.total_return:+.2%}",
+            f"{r.symbol}  |  WR: {r.win_rate:.1%}  "
+            f"PF: {r.profit_factor:.2f}  "
+            f"DD: {r.max_drawdown:.2%}  "
+            f"Return: {r.total_return:+.2%}",
             fontsize=11
         )
         ax.set_xlabel('Bar (15M candle)')
@@ -507,23 +593,91 @@ def plot_results(results: list):
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('backtest_result.png', dpi=150, bbox_inches='tight')
-    print("\n  Chart disimpan: backtest_result.png")
-    plt.show()
+
+    # Simpan di folder yang sama dengan script ini
+    script_dir  = os.path.dirname(os.path.abspath(__file__))
+    chart_path  = os.path.join(script_dir, 'backtest_result.png')
+    plt.savefig(chart_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"\n  Chart disimpan: {chart_path}")
+    return chart_path
 
 # ─────────────────────────────────────────────────────────────
-# MAIN — jalankan semua pair
+# KIRIM KE TELEGRAM
+# ─────────────────────────────────────────────────────────────
+def send_to_telegram(results: list, chart_path: str):
+    """Kirim summary + chart equity curve ke Telegram."""
+    if not results:
+        _tg_send("⚠️ <b>Backtest selesai</b> — tidak ada hasil.")
+        return
+
+    lines = "📊 <b>BACKTEST RESULT — VortexBot</b>\n"
+    lines += "=" * 35 + "\n"
+
+    for r in results:
+        ok     = r.win_rate >= 0.45 and r.profit_factor >= 1.5 \
+                 and r.max_drawdown > -0.20
+        status = "✅" if ok else "⚠️"
+        sign   = "+" if r.total_return >= 0 else ""
+
+        lines += (
+            f"\n{status} <b>{r.symbol}</b>\n"
+            f"  Trades   : {len(r.trades)}\n"
+            f"  Win Rate : <b>{r.win_rate:.1%}</b>\n"
+            f"  PF       : <b>{r.profit_factor:.2f}</b>\n"
+            f"  Max DD   : <b>{r.max_drawdown:.2%}</b>\n"
+            f"  Sharpe   : {r.sharpe_ratio:.2f}\n"
+            f"  Return   : <b>{sign}{r.total_return:.2%}</b>\n"
+            f"  Capital  : <b>${r.equity_curve[-1]:.2f}</b>\n"
+        )
+
+        diag = []
+        if r.win_rate < 0.40:
+            diag.append("WR rendah → longgarkan stoch")
+        if r.profit_factor < 1.5:
+            diag.append("PF rendah → naikkan TP1 RR")
+        if r.max_drawdown < -0.20:
+            diag.append("DD tinggi → kurangi risk/trade")
+        if not diag:
+            diag.append("Siap dioptimasi lebih lanjut ✅")
+        lines += f"  💡 {' | '.join(diag)}\n"
+
+    lines += f"\n{'='*35}"
+
+    print("\n  Mengirim hasil ke Telegram...")
+    ok_msg = _tg_send(lines)
+    if ok_msg:
+        print("  ✅ Teks terkirim ke Telegram")
+    else:
+        print("  ❌ Gagal kirim teks ke Telegram")
+
+    ok_photo = _tg_send_photo(
+        chart_path,
+        caption="📈 Equity Curve — VortexBot Backtest"
+    )
+    if ok_photo:
+        print("  ✅ Chart terkirim ke Telegram")
+    else:
+        print("  ❌ Gagal kirim chart ke Telegram")
+
+# ─────────────────────────────────────────────────────────────
+# MAIN
 # ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     print("=" * 50)
     print("  VortexBot Backtesting — SMC Multi-TF")
     print("=" * 50)
 
+    # Cek apakah Telegram sudah dikonfigurasi
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        print(f"  📱 Telegram: aktif (chat_id: {TELEGRAM_CHAT_ID})")
+    else:
+        print("  📱 Telegram: tidak aktif (set env TELEGRAM_TOKEN & TELEGRAM_CHAT_ID)")
+
     all_results = []
 
     for symbol in PAIRS:
         print(f"\n⏳ Loading data: {symbol}")
-
         df_15m = fetch_ohlcv(symbol, '15m', limit=2000)
         df_1h  = fetch_ohlcv(symbol, '1h',  limit=1000)
         df_4h  = fetch_ohlcv(symbol, '4h',  limit=500)
@@ -535,15 +689,26 @@ if __name__ == '__main__':
         result = run_backtest(symbol, df_15m, df_1h, df_4h)
         all_results.append(result)
 
-    if all_results:
-        print(f"\n{'='*50}")
-        print("  SUMMARY SEMUA PAIR")
-        print(f"{'='*50}")
-        for r in all_results:
-            status = "✅" if r.win_rate >= 0.45 and r.profit_factor >= 1.5 else "⚠️ "
-            print(f"  {status} {r.symbol:<20} WR: {r.win_rate:.1%}  PF: {r.profit_factor:.2f}  "
-                  f"Return: {r.total_return:+.2%}")
+    if not all_results:
+        print("\n  Tidak ada hasil — cek koneksi internet.")
+        sys.exit(1)
 
-        plot_results(all_results)
-    else:
-        print("\n  Tidak ada hasil — cek koneksi internet atau symbol.")
+    # Summary di terminal
+    print(f"\n{'='*50}")
+    print("  SUMMARY SEMUA PAIR")
+    print(f"{'='*50}")
+    for r in all_results:
+        ok     = r.win_rate >= 0.45 and r.profit_factor >= 1.5
+        status = "✅" if ok else "⚠️ "
+        print(
+            f"  {status} {r.symbol:<20} "
+            f"WR: {r.win_rate:.1%}  "
+            f"PF: {r.profit_factor:.2f}  "
+            f"Return: {r.total_return:+.2%}"
+        )
+
+    # Plot & kirim ke Telegram
+    chart_path = plot_results(all_results)
+    send_to_telegram(all_results, chart_path)
+
+    print("\n  Selesai! ✅")

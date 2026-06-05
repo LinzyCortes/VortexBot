@@ -8,9 +8,13 @@
 #     in_delay dari get_session_info() — delay
 #     sudah dipisah dari should_avoid di news_filter.
 #   - Log Regime di scan done sekarang akurat.
+# UPDATE:
+#   - Mini App API server (FastAPI) jalan di thread
+#     terpisah di port 8080, tidak ganggu bot loop.
 # ============================================
 
 import time
+import threading
 import schedule
 from datetime import datetime, timezone, timedelta
 from config import cfg
@@ -29,6 +33,7 @@ from strategy.correlation import correlation_filter
 from risk.management import risk_manager
 from notification.telegram import telegram
 from learning.evaluator import evaluator
+from api import start_api_server, set_bot_ref
 
 # ─── Timezone Helpers ────────────────────────────────────────────────────────
 WIB = timezone(timedelta(hours=7))
@@ -357,12 +362,10 @@ class VortexBot:
             killzone = session_filter.is_killzone()
             if not killzone.get("in_killzone"):
                 if killzone.get("in_delay"):
-                    # Delay: analisis tetap jalan, log info saja
                     logger.info(
                         f"⏳ {pair}: {killzone.get('delay_reason')} "
                         f"— analisis tetap, entry tunggu delay selesai"
                     )
-                    # Lanjut analisis (tidak return)
                 else:
                     next_s = killzone.get("next_session", {})
                     logger.info(
@@ -733,7 +736,6 @@ class VortexBot:
             tp3       = signal.get("tp3_price")
             bp_mode   = signal.get("bp_mode", "NONE")
 
-            # Breakout terdeteksi tapi retest belum confirm → tunggu
             if bp_mode == "BREAKOUT_WAIT":
                 logger.info(
                     f"⏳ {pair}: Breakout detected — "
@@ -1291,10 +1293,6 @@ class VortexBot:
     # ═════════════════════════════════════════════════════════════════════════
 
     def run(self):
-        if not self.startup():
-            logger.error("❌ Startup failed!")
-            return
-
         self.setup_scheduled_tasks()
 
         logger.info(
@@ -1306,6 +1304,7 @@ class VortexBot:
             f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/24\n"
             f"   SL       : 2.0x ATR Dynamic\n"
             f"   Delays   : London+15m NY+5m Asia skip\n"
+            f"   API      : port 8080\n"
             f"   Time WIB : {wib_str()}\n"
             f"   Time UTC : {utc_str()}"
         )
@@ -1409,7 +1408,29 @@ if __name__ == "__main__":
 ║   SMC + Fibonacci + BP + VWAP            ║
 ║   Funding + Correlation + Regime         ║
 ║   BOS Freshness | ATR 2.0x | Score /24  ║
+║   Mini App API  : port 8080              ║
 ╚══════════════════════════════════════════╝
     """)
+
     bot = VortexBot()
+
+    # Startup bot (connect exchange, detect regime, init telegram)
+    if not bot.startup():
+        logger.error("❌ Startup failed!")
+        exit(1)
+
+    # Hubungkan bot ke API server supaya bisa akses open_trades, dll
+    set_bot_ref(bot)
+
+    # Jalankan API server di background thread (tidak ganggu bot loop)
+    api_thread = threading.Thread(
+        target=start_api_server,
+        kwargs={"bot_ref": bot, "host": "0.0.0.0", "port": 8080},
+        daemon=True,
+        name="VortexAPI"
+    )
+    api_thread.start()
+    logger.info("🌐 Mini App API server started on port 8080")
+
+    # Bot main loop — blocking sampai bot.running = False
     bot.run()

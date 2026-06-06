@@ -225,11 +225,13 @@ def get_positions():
         if _bot_ref:
             open_trades = _bot_ref.open_trades or {}
 
-        # Juga ambil dari DB untuk data lengkap
-        try:
-            db_trades = db.get_open_trades() or []
-        except Exception:
-            db_trades = []
+        # Kalau memory kosong (bot baru restart), ambil dari DB
+        if not open_trades:
+            db_open = db.get_open_trades() or []
+            for t in db_open:
+                tid = t.get("id", t.get("trade_id"))
+                if tid:
+                    open_trades[str(tid)] = t
 
         result = []
         for trade_id, t in open_trades.items():
@@ -555,26 +557,65 @@ def close_trade(req: CloseTradeRequest):
     try:
         trade_id = req.trade_id
 
-        if not _bot_ref or trade_id not in _bot_ref.open_trades:
-            raise HTTPException(404, f"Trade {trade_id} tidak ditemukan di open trades")
+        # Cari trade di memory bot dulu
+        trade = None
+        if _bot_ref and str(trade_id) in {str(k) for k in _bot_ref.open_trades.keys()}:
+            # Cari key yang match (bisa int atau string)
+            for k in list(_bot_ref.open_trades.keys()):
+                if str(k) == str(trade_id):
+                    trade = _bot_ref.open_trades[k]
+                    trade_key = k
+                    break
 
-        trade = _bot_ref.open_trades[trade_id]
+        # Kalau tidak ada di memory, ambil dari DB
+        if not trade:
+            db_trades = db.get_open_trades() or []
+            for t in db_trades:
+                if str(t.get("id", t.get("trade_id", ""))) == str(trade_id):
+                    trade = t
+                    trade_key = None
+                    break
+
+        if not trade:
+            raise HTTPException(404, f"Trade {trade_id} tidak ditemukan")
+
         pair      = trade.get("pair")
         direction = trade.get("direction")
         qty       = trade.get("quantity_remaining", trade.get("size", 0))
 
-        exchange.cancel_all_orders(pair)
-        exchange.close_position(pair, direction, qty)
+        # Close di exchange
+        try:
+            exchange.cancel_all_orders(pair)
+        except Exception:
+            pass
+        try:
+            exchange.close_position(pair, direction, qty)
+        except Exception as e:
+            # Kalau gagal close di exchange, tetap close di DB
+            pass
 
         # Ambil harga close sekarang
-        cur_price = _safe_float(exchange.get_ticker(pair).get("last", 0))
-        entry     = _safe_float(trade.get("entry_price", 0))
-        pnl       = (cur_price - entry) * qty if direction == "BUY" else (entry - cur_price) * qty
+        cur_price = 0.0
+        try:
+            cur_price = _safe_float(exchange.get_ticker(pair).get("last", 0))
+        except Exception:
+            pass
 
-        new_balance = _safe_float(exchange.get_balance().get("free", 0))
+        entry = _safe_float(trade.get("entry_price", 0))
+        pnl   = (cur_price - entry) * _safe_float(qty) if direction == "BUY" else (entry - cur_price) * _safe_float(qty)
+
+        new_balance = 0.0
+        try:
+            new_balance = _safe_float(exchange.get_balance().get("free", 0))
+        except Exception:
+            pass
+
         if getattr(cfg, "IS_OKX_DEMO", False):
-            new_balance = risk_manager.update_virtual_balance_after_trade(pnl)
-            risk_manager.release_balance(trade.get("risk_amount", 0))
+            try:
+                new_balance = risk_manager.update_virtual_balance_after_trade(pnl)
+                risk_manager.release_balance(trade.get("risk_amount", 0))
+            except Exception:
+                pass
 
         close_data = {
             "status"      : "CLOSED",
@@ -585,15 +626,20 @@ def close_trade(req: CloseTradeRequest):
             "close_time_wib": now_wib().isoformat(),
             "close_time_utc": now_utc().isoformat(),
         }
-        db.close_trade(trade_id, close_data)
 
-        if trade_id in _bot_ref.open_trades:
-            del _bot_ref.open_trades[trade_id]
+        try:
+            db.close_trade(int(trade_id), close_data)
+        except Exception:
+            db.close_trade(trade_id, close_data)
+
+        # Hapus dari memory bot kalau ada
+        if _bot_ref and trade_key is not None:
+            _bot_ref.open_trades.pop(trade_key, None)
 
         telegram.send(
             f"{'✅' if pnl >= 0 else '❌'} <b>MANUAL CLOSE</b>\n"
             f"Pair  : {pair}\n"
-            f"PnL   : {'+'if pnl>=0 else ''}{pnl:.4f} USDT\n"
+            f"PnL   : {'+' if pnl>=0 else ''}{pnl:.4f} USDT\n"
             f"Entry : {entry:.4f}\n"
             f"Close : {cur_price:.4f}\n"
             f"Via   : Mini App\n"

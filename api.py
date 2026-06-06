@@ -373,7 +373,7 @@ def get_stats():
 @app.get("/api/history")
 def get_history(limit: int = 30):
     try:
-        trades = db.get_closed_trades(limit=limit) or []
+        trades = db.get_trade_history(limit=limit) or []
         result = []
         for t in trades:
             pnl = _safe_float(t.get("pnl", 0))

@@ -828,12 +828,30 @@ html,body{
       </div>
     </div>
     <div class="form-grp">
-      <label class="form-lbl">Stop Loss (wajib)</label>
-      <input class="form-inp" id="tSL" type="number" placeholder="Harga SL" step="any">
+      <label class="form-lbl">Entry Price (kosongkan = harga pasar)</label>
+      <input class="form-inp" id="tEntry" type="number" placeholder="Auto = harga sekarang" step="any" oninput="autoCalcTP()">
     </div>
     <div class="form-grp">
-      <label class="form-lbl">Take Profit TP2 (optional)</label>
-      <input class="form-inp" id="tTP" type="number" placeholder="Kosongkan = auto" step="any">
+      <label class="form-lbl">Stop Loss — wajib</label>
+      <input class="form-inp" id="tSL" type="number" placeholder="Harga SL" step="any" oninput="autoCalcTP()">
+    </div>
+    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px">
+      <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px">Take Profit — Auto kalkulasi dari RR</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        <div>
+          <div style="font-size:9px;color:var(--green);margin-bottom:4px">TP1 · RR 1:1 · 30%</div>
+          <input class="form-inp" id="tTP1" type="number" step="any" style="font-size:11px;padding:7px 8px;opacity:.7" readonly>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--cyan);margin-bottom:4px">TP2 · RR 1:2 · 40%</div>
+          <input class="form-inp" id="tTP2" type="number" step="any" style="font-size:11px;padding:7px 8px;opacity:.7" readonly>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--blue);margin-bottom:4px">TP3 · RR 1:3 · 30%</div>
+          <input class="form-inp" id="tTP3" type="number" step="any" style="font-size:11px;padding:7px 8px;opacity:.7" readonly>
+        </div>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:8px" id="rrDisplay">Isi Entry & SL untuk lihat kalkulasi RR</div>
     </div>
     <button class="btn-submit" id="btnSubmit" onclick="submitTrade()">Submit Trade</button>
     <button class="btn-cancel" onclick="closeModal('modalOpenTrade')">Batal</button>
@@ -1293,6 +1311,32 @@ function quickTrade(dir){
   document.getElementById('tPair').value=curPair;
   selDir(dir);openModal('modalOpenTrade');
 }
+function autoCalcTP(){
+  const entry = parseFloat(document.getElementById('tEntry').value) || 0;
+  const sl    = parseFloat(document.getElementById('tSL').value) || 0;
+  const dir   = curDir;
+  if(!sl || (!entry && !dir)) return;
+
+  // Gunakan harga terakhir sebagai entry kalau field kosong
+  const useEntry = entry || parseFloat(document.getElementById('priceMain').textContent.replace(/[^0-9.]/g,'')) || 0;
+  if(!useEntry || !sl) return;
+
+  const risk = Math.abs(useEntry - sl);
+  if(risk <= 0) return;
+
+  const isLong = dir === 'LONG';
+  const tp1 = isLong ? useEntry + risk * 1 : useEntry - risk * 1;
+  const tp2 = isLong ? useEntry + risk * 2 : useEntry - risk * 2;
+  const tp3 = isLong ? useEntry + risk * 3 : useEntry - risk * 3;
+  const dec = useEntry > 100 ? 2 : 4;
+
+  document.getElementById('tTP1').value = tp1.toFixed(dec);
+  document.getElementById('tTP2').value = tp2.toFixed(dec);
+  document.getElementById('tTP3').value = tp3.toFixed(dec);
+  document.getElementById('rrDisplay').textContent =
+    `Risk: ${risk.toFixed(dec)} | TP1: RR1:1 | TP2: RR1:2 | TP3: RR1:3`;
+}
+
 async function submitTrade(){
   if(!curDir){toast('Pilih arah dulu','err');return}
   const sl=document.getElementById('tSL').value;
@@ -1300,16 +1344,27 @@ async function submitTrade(){
   const btn=document.getElementById('btnSubmit');
   btn.disabled=true;btn.textContent='Submitting...';
   try{
+    const entryVal = parseFloat(document.getElementById('tEntry').value)||null;
+    const tp1Val   = parseFloat(document.getElementById('tTP1').value)||null;
+    const tp2Val   = parseFloat(document.getElementById('tTP2').value)||null;
+    const tp3Val   = parseFloat(document.getElementById('tTP3').value)||null;
     const r=await api('/api/open_trade','POST',{
       pair:document.getElementById('tPair').value,
       direction:curDir==='LONG'?'BUY':'SELL',
       sl_price:parseFloat(sl),
-      tp_price:parseFloat(document.getElementById('tTP').value)||null,
+      entry_price:entryVal,
+      tp1_price:tp1Val,
+      tp_price:tp2Val,
+      tp3_price:tp3Val,
     });
     closeModal('modalOpenTrade');
-    toast('Trade dibuka!','ok');
+    toast('Trade dibuka! TP1/2/3 sudah di-set','ok');
+    document.getElementById('tEntry').value='';
     document.getElementById('tSL').value='';
-    document.getElementById('tTP').value='';
+    document.getElementById('tTP1').value='';
+    document.getElementById('tTP2').value='';
+    document.getElementById('tTP3').value='';
+    document.getElementById('rrDisplay').textContent='Isi Entry & SL untuk lihat kalkulasi RR';
     curDir=null;selDir(null);
     loadMarket();
   }catch(e){toast('Gagal: '+e.message,'err')}

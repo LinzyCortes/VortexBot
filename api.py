@@ -224,7 +224,10 @@ def get_positions():
             open_trades = _bot_ref.open_trades or {}
 
         # Juga ambil dari DB untuk data lengkap
-        db_trades = db.get_open_trades() or []
+        try:
+            db_trades = db.get_open_trades() or []
+        except Exception:
+            db_trades = []
 
         result = []
         for trade_id, t in open_trades.items():
@@ -387,15 +390,16 @@ def get_history(limit: int = 30):
                 "tp1_price"       : round(_safe_float(t.get("tp1_price", 0)), 6),
                 "tp2_price"       : round(_safe_float(t.get("tp2_price", 0)), 6),
                 "pnl"             : round(pnl, 4),
-                "rr_achieved"     : round(_safe_float(t.get("rr_achieved", 0)), 2),
-                "confluence_score": t.get("confluence_score", 0),
-                "close_reason"    : t.get("close_reason", ""),
-                "duration_minutes": t.get("duration_minutes", 0),
+                "rr_achieved"     : round(_safe_float(t.get("rr_achieved", t.get("rr", 0))), 2),
+                "confluence_score": t.get("confluence_score", t.get("score", 0)),
+                "close_reason"    : t.get("close_reason", t.get("reason", "")),
+                "duration_minutes": t.get("duration_minutes", t.get("duration", 0)),
                 "bp_mode"         : t.get("bp_mode", ""),
                 "vwap_zone"       : t.get("vwap_zone", ""),
                 "regime"          : t.get("regime", ""),
                 "btc_trend"       : t.get("btc_trend", ""),
-                "close_time_wib"  : str(t.get("close_time_wib", ""))[:16] if t.get("close_time_wib") else "–",
+                "close_time_wib"  : str(t.get("close_time_wib", t.get("closed_at", "")))[:16] if t.get("close_time_wib") or t.get("closed_at") else "–",
+                "status"          : t.get("status", "CLOSED"),
             })
         return {"trades": result, "count": len(result)}
     except Exception as e:
@@ -616,7 +620,9 @@ def resume_bot():
 @app.get("/api/signals")
 def get_signals(limit: int = 10):
     try:
-        signals = db.get_recent_signals(limit=limit) or []
+        # Ambil dari history trade sebagai proxy signals
+        trades = db.get_trade_history(limit=limit) or []
+        signals = [t for t in trades if t.get("confluence_score", 0) > 0]
         return {"signals": signals, "count": len(signals)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

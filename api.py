@@ -65,7 +65,9 @@ class OpenTradeRequest(BaseModel):
     direction: str          # "BUY" atau "SELL"
     sl_price: float
     entry_price: Optional[float] = None
-    tp_price: Optional[float] = None
+    tp1_price: Optional[float] = None
+    tp_price: Optional[float] = None   # TP2
+    tp3_price: Optional[float] = None
 
 class CloseTradeRequest(BaseModel):
     trade_id: str
@@ -469,6 +471,13 @@ def open_trade(req: OpenTradeRequest):
         leverage = position.get("leverage", 1)
         quantity = position.get("quantity", 0)
 
+        # Hitung TP otomatis kalau tidak diisi
+        risk = abs(entry - req.sl_price)
+        is_long = direction == "BUY"
+        tp1 = req.tp1_price or (entry + risk * 1 if is_long else entry - risk * 1)
+        tp2 = req.tp_price  or (entry + risk * 2 if is_long else entry - risk * 2)
+        tp3 = req.tp3_price or (entry + risk * 3 if is_long else entry - risk * 3)
+
         exchange.set_leverage(pair, leverage)
         side  = "buy" if direction == "BUY" else "sell"
         order = exchange.place_market_order(pair, side, quantity)
@@ -476,17 +485,17 @@ def open_trade(req: OpenTradeRequest):
             raise HTTPException(500, "Order gagal di exchange")
 
         exchange.place_stop_loss(pair, side, quantity, req.sl_price)
-        if req.tp_price:
-            tp_qty = round(quantity * 0.4, 6)
-            exchange.place_take_profit(pair, side, tp_qty, req.tp_price)
+        tp_qty = round(quantity * 0.4, 6)
+        exchange.place_take_profit(pair, side, tp_qty, tp2)
 
         trade_data = {
             "pair"       : pair,
             "direction"  : direction,
             "entry_price": entry,
             "sl_price"   : req.sl_price,
-            "tp1_price"  : req.tp_price or 0,
-            "tp2_price"  : req.tp_price or 0,
+            "tp1_price"  : tp1,
+            "tp2_price"  : tp2,
+            "tp3_price"  : tp3,
             "size"       : quantity,
             "leverage"   : leverage,
             "mode"       : position.get("mode", "MANUAL"),
@@ -514,6 +523,9 @@ def open_trade(req: OpenTradeRequest):
             f"Dir  : {direction}\n"
             f"Entry: {entry:.4f}\n"
             f"SL   : {req.sl_price:.4f}\n"
+            f"TP1  : {tp1:.4f} (RR 1:1)\n"
+            f"TP2  : {tp2:.4f} (RR 1:2)\n"
+            f"TP3  : {tp3:.4f} (RR 1:3)\n"
             f"Qty  : {quantity}\n"
             f"Lev  : {leverage}x\n"
             f"Via  : Mini App\n"
@@ -529,6 +541,9 @@ def open_trade(req: OpenTradeRequest):
             "quantity": quantity,
             "leverage": leverage,
             "sl"      : req.sl_price,
+            "tp1"     : tp1,
+            "tp2"     : tp2,
+            "tp3"     : tp3,
         }
     except HTTPException: raise
     except Exception as e:

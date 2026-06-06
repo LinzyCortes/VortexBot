@@ -199,7 +199,7 @@ html,body{
 
 /* ── MINI CHART ── */
 .chart-wrap{
-  height:56px;margin:10px 0 2px;position:relative;overflow:hidden;
+  height:80px;margin:10px 0 2px;position:relative;overflow:hidden;
 }
 .chart-wrap canvas{width:100%!important;height:100%!important}
 
@@ -948,29 +948,56 @@ function drawChart(prices,up){
   const ctx=document.getElementById('miniChart').getContext('2d');
   if(miniChartInst){miniChartInst.destroy();miniChartInst=null}
   const color=up?'#00d08a':'#ff4d6a';
+  const glow=up?'rgba(0,208,138,.15)':'rgba(255,77,106,.15)';
   miniChartInst=new Chart(ctx,{
     type:'line',
     data:{
       labels:prices.map((_,i)=>i),
       datasets:[{
-        data:prices,borderColor:color,borderWidth:1.5,
+        data:prices,
+        borderColor:color,
+        borderWidth:1.8,
         fill:true,
         backgroundColor:(ctx2=>{
-          const g=ctx2.chart.ctx.createLinearGradient(0,0,0,56);
-          g.addColorStop(0,up?'rgba(0,208,138,.18)':'rgba(255,77,106,.18)');
+          const g=ctx2.chart.ctx.createLinearGradient(0,0,0,60);
+          g.addColorStop(0,glow);
           g.addColorStop(1,'rgba(0,0,0,0)');
           return g;
         }),
-        tension:.4,pointRadius:0
+        tension:.35,
+        pointRadius:0,
+        pointHoverRadius:3,
+        pointHoverBackgroundColor:color,
       }]
     },
     options:{
       responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{display:false},tooltip:{enabled:false}},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          enabled:true,
+          mode:'index',intersect:false,
+          backgroundColor:'rgba(19,22,30,.95)',
+          borderColor:color,borderWidth:1,
+          titleColor:'#8891a8',bodyColor:color,
+          titleFont:{size:9},bodyFont:{size:11,weight:'700'},
+          callbacks:{label:ctx=>'$'+ctx.raw.toFixed(2)}
+        }
+      },
       scales:{x:{display:false},y:{display:false}},
-      animation:{duration:300}
+      animation:{duration:400,easing:'easeInOutQuart'},
+      interaction:{mode:'nearest',axis:'x',intersect:false}
     }
   });
+}
+
+async function loadOHLCV(pair){
+  try{
+    const d = await api('/api/ohlcv?pair='+pair+'&tf=15m&limit=60');
+    const candles = d.candles||[];
+    if(candles.length < 2) return null;
+    return candles.map(c=>c.c); // close prices
+  }catch(e){return null}
 }
 
 // ── LOAD MARKET ────────────────────────
@@ -993,18 +1020,37 @@ async function loadMarket(){
       const chEl=document.getElementById('priceChange');
       chEl.textContent=(up?'+':'')+f(chg,2)+'%';
       chEl.className='price-change '+(up?'up':'dn');
-      document.getElementById('priceHigh').textContent=f(t.high,2);
-      document.getElementById('priceLow').textContent=f(t.low,2);
+
+      // High/Low — kalau 0 dari ticker, hitung dari harga ±2%
+      const high = t.high && t.high>0 ? t.high : price*1.02;
+      const low  = t.low  && t.low>0  ? t.low  : price*0.98;
+      document.getElementById('priceHigh').textContent=f(high,price>100?2:4);
+      document.getElementById('priceLow').textContent=f(low,price>100?2:4);
+
       const vol=t.vol_usdt||0;
-      document.getElementById('priceVol').textContent=vol>1e9?(vol/1e9).toFixed(1)+'B':vol>1e6?(vol/1e6).toFixed(1)+'M':vol>1e3?(vol/1e3).toFixed(0)+'K':f(vol,0);
+      document.getElementById('priceVol').textContent=vol>1e9?(vol/1e9).toFixed(1)+'B':vol>1e6?(vol/1e6).toFixed(1)+'M':vol>1e3?(vol/1e3).toFixed(0)+'K':vol>0?f(vol,0):'–';
       const fr=t.funding_rate||0;
       const frEl=document.getElementById('priceFunding');
       frEl.textContent=(fr>=0?'+':'')+f(fr*100,4)+'%';
       frEl.style.color=fr>0.001?'var(--red)':fr<-0.001?'var(--green)':'var(--muted2)';
-      // fake chart from high/low
-      const prices=[];for(let i=0;i<32;i++)prices.push(t.low+(t.high-t.low)*(.3+.4*Math.sin(i*.35)+.3*Math.random()));
-      if(price) prices.push(price);
-      drawChart(prices,up);
+
+      // Load real OHLCV untuk chart
+      loadOHLCV(curPair).then(prices=>{
+        if(prices && prices.length>1){
+          drawChart(prices,up);
+        } else {
+          // Fallback: smooth sinusoidal dari range harga
+          const range=high-low;
+          const fb=[];
+          for(let i=0;i<48;i++){
+            const pos=i/47;
+            const wave=Math.sin(pos*Math.PI*3+1)*0.3+Math.sin(pos*Math.PI*7)*0.15;
+            fb.push(low+range*(0.3+0.4*pos+wave*0.3));
+          }
+          if(price>0) fb.push(price);
+          drawChart(fb,up);
+        }
+      });
     }
 
     // Session

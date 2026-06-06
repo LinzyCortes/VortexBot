@@ -678,8 +678,32 @@ def resume_bot():
         raise HTTPException(status_code=500, detail=str(e))
 
 # ─── RECENT SIGNALS ──────────────────────────
-@app.get("/api/signals")
-def get_signals(limit: int = 10):
+@app.get("/api/ohlcv")
+def get_ohlcv(pair: str = "ETH-USDT-SWAP", tf: str = "15m", limit: int = 60):
+    try:
+        # Map timeframe frontend ke format OKX
+        tf_map = {"1m":"1m","5m":"5m","15m":"15m","1h":"1H","4h":"4H","1d":"1D"}
+        okx_tf = tf_map.get(tf, "15m")
+        candles = exchange.get_ohlcv(pair, okx_tf, limit=limit)
+        if not candles:
+            return {"candles": [], "pair": pair, "tf": tf}
+        # Format: [timestamp, open, high, low, close, volume]
+        result = []
+        for c in candles:
+            try:
+                result.append({
+                    "t": int(c[0]) if c[0] else 0,
+                    "o": float(c[1]) if c[1] else 0,
+                    "h": float(c[2]) if c[2] else 0,
+                    "l": float(c[3]) if c[3] else 0,
+                    "c": float(c[4]) if c[4] else 0,
+                    "v": float(c[5]) if len(c) > 5 else 0,
+                })
+            except Exception:
+                continue
+        return {"candles": result, "pair": pair, "tf": tf, "count": len(result)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     try:
         # Ambil dari history trade sebagai proxy signals
         trades = db.get_trade_history(limit=limit) or []

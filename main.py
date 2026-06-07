@@ -1125,6 +1125,7 @@ class VortexBot:
 
     def setup_scheduled_tasks(self):
         schedule.every().day.at("00:00").do(self._morning_briefing)
+        schedule.every().day.at("07:00").do(self._run_backup)
         schedule.every().day.at("10:00").do(self._london_session_summary)
         schedule.every().day.at("15:00").do(self._daily_summary)
         schedule.every().day.at("16:00").do(self._ny_session_summary)
@@ -1142,6 +1143,13 @@ class VortexBot:
             "   NY sum    : 16:00 WIB\n"
             "   Weekly    : Minggu 07:00 WIB"
         )
+
+    def _run_backup(self):
+        try:
+            from backup import run_scheduled_backup
+            run_scheduled_backup()
+        except Exception as e:
+            logger.error(f"❌ Backup error: {e}")
 
     def _morning_briefing(self):
         try:

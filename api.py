@@ -704,13 +704,44 @@ def get_ohlcv(pair: str = "ETH-USDT-SWAP", tf: str = "15m", limit: int = 60):
         return {"candles": result, "pair": pair, "tf": tf, "count": len(result)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/signals")
+def get_signals(limit: int = 10):
     try:
-        # Ambil dari history trade sebagai proxy signals
         trades = db.get_trade_history(limit=limit) or []
         signals = [t for t in trades if t.get("confluence_score", 0) > 0]
         return {"signals": signals, "count": len(signals)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/backup")
+def trigger_backup():
+    try:
+        import subprocess, os
+        if not os.path.exists("backup.py"):
+            raise HTTPException(500, "backup.py tidak ditemukan — ikuti panduan SETUP.md")
+        result = subprocess.run(
+            ["python3", "backup.py", "--manual"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            return {"success": True, "message": "Backup berhasil", "output": result.stdout[:200]}
+        else:
+            raise HTTPException(500, f"Backup gagal: {result.stderr[:200]}")
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/backup/status")
+def backup_status():
+    try:
+        import os, json
+        if os.path.exists("backup_status.json"):
+            with open("backup_status.json") as f:
+                return json.load(f)
+        return {"last_backup": None, "status": "never"}
+    except Exception as e:
+        return {"last_backup": None, "status": "error"}
 
 # ═════════════════════════════════════════════
 # SERVER RUNNER

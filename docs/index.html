@@ -198,6 +198,17 @@ html,body{
 .pm-val{font-size:12px;font-weight:700;margin-top:1px}
 
 /* ── MINI CHART ── */
+
+/* TF SELECTOR */
+.tf-sel{display:flex;gap:4px;margin:8px 0 4px;overflow-x:auto;scrollbar-width:none}
+.tf-sel::-webkit-scrollbar{display:none}
+.tf-btn{
+  flex:0 0 auto;padding:4px 10px;border-radius:5px;font-size:10px;font-weight:700;
+  cursor:pointer;font-family:var(--font);border:1px solid var(--border);
+  background:var(--bg3);color:var(--muted2);transition:all .15s;
+}
+.tf-btn.sel{background:rgba(59,126,255,.15);color:var(--blue);border-color:rgba(59,126,255,.35)}
+
 .chart-wrap{
   height:80px;margin:10px 0 2px;position:relative;overflow:hidden;
 }
@@ -545,6 +556,15 @@ html,body{
       <button class="pair-btn" onclick="selectPair('BNB-USDT-SWAP',this)">BNB</button>
       <button class="pair-btn" onclick="selectPair('AAVE-USDT-SWAP',this)">AAVE</button>
     </div>
+    <!-- TF Selector -->
+    <div class="pair-sel" id="tfSel" style="margin-bottom:0">
+      <button class="pair-btn" onclick="selectTF('5m',this)">5m</button>
+      <button class="pair-btn sel" onclick="selectTF('15m',this)" id="tf15">15m</button>
+      <button class="pair-btn" onclick="selectTF('30m',this)">30m</button>
+      <button class="pair-btn" onclick="selectTF('1h',this)">1h</button>
+      <button class="pair-btn" onclick="selectTF('4h',this)">4h</button>
+      <button class="pair-btn" onclick="selectTF('1d',this)">1D</button>
+    </div>
 
     <!-- Price Card -->
     <div class="price-card">
@@ -555,6 +575,14 @@ html,body{
       <div class="price-main" id="priceMain">–</div>
       <div class="price-change" id="priceChange">–</div>
       <div class="chart-wrap"><canvas id="miniChart"></canvas></div>
+      <div class="tf-sel">
+        <button class="tf-btn" onclick="changeTF('5m',this)">5M</button>
+        <button class="tf-btn sel" onclick="changeTF('15m',this)" id="tfDef">15M</button>
+        <button class="tf-btn" onclick="changeTF('30m',this)">30M</button>
+        <button class="tf-btn" onclick="changeTF('1h',this)">1H</button>
+        <button class="tf-btn" onclick="changeTF('4h',this)">4H</button>
+        <button class="tf-btn" onclick="changeTF('1d',this)">1D</button>
+      </div>
       <div class="price-meta">
         <div class="price-meta-item">
           <div class="pm-label">24H High</div>
@@ -1017,12 +1045,93 @@ const pCls=n=>Number(n)>=0?'up':'dn';
 // ── PAIR SELECT ────────────────────────
 function selectPair(pair,el){
   curPair=pair;
-  document.querySelectorAll('.pair-btn').forEach(b=>b.classList.remove('sel'));
+  // Only remove sel from pair buttons, not TF buttons
+  document.querySelectorAll('#pairSel .pair-btn').forEach(b=>b.classList.remove('sel'));
   el.classList.add('sel');
   const base=pair.split('-')[0];
   document.getElementById('pricePair').textContent=base+' / USDT SWAP';
   document.getElementById('exchName').textContent='OKX · '+pair;
   loadMarket();
+}
+
+// ── TF SELECT ──────────────────────────
+function selectTF(tf, el){
+  curTF = tf;
+  document.querySelectorAll('#tfSel .pair-btn').forEach(b=>b.classList.remove('sel'));
+  el.classList.add('sel');
+  // Reload chart with new TF
+  loadOHLCV(curPair, tf).then(prices=>{
+    if(prices && prices.length>1){
+      const cur = parseFloat(document.getElementById('priceMain').textContent)||0;
+      const chg = parseFloat((document.getElementById('priceChange').textContent||'0').replace('%',''));
+      drawChart(prices, chg>=0);
+    }
+  });
+}
+
+// ── SILENT MARKET UPDATE (no DOM flicker) ──
+async function loadMarketSilent(){
+  try{
+    const [tickers,sess,regime] = await Promise.allSettled([
+      api('/api/tickers'), api('/api/session'), api('/api/regime')
+    ]);
+    if(tickers.status==='fulfilled'){
+      const t=tickers.value[curPair]||{};
+      const price=t.last||0;
+      const chg=t.change_pct||0;
+      const up=chg>=0;
+      if(price>0) document.getElementById('priceMain').textContent=f(price,price<10?4:2);
+      const chEl=document.getElementById('priceChange');
+      chEl.textContent=(up?'+':'')+f(chg,2)+'%';
+      chEl.className='price-change '+(up?'up':'dn');
+      const fr=t.funding_rate||0;
+      const frEl=document.getElementById('priceFunding');
+      if(frEl){frEl.textContent=(fr>=0?'+':'')+f(fr*100,4)+'%';}
+    }
+    if(sess.status==='fulfilled'){
+      const d=sess.value;
+      const kzEl=document.getElementById('kzStatus');
+      if(kzEl){
+        if(d.in_killzone){kzEl.className='kz-on';kzEl.textContent='⚡ '+(d.killzone_session||d.session_name||'Killzone')+' AKTIF';}
+        else{kzEl.className='kz-off';kzEl.textContent='Di luar Killzone';}
+      }
+    }
+    if(regime.status==='fulfilled'){
+      const d=regime.value;
+      const emo={BULL:'📈',BEAR:'📉',RANGING:'↔️',UNKNOWN:'❓'};
+      const rEl=document.getElementById('regimeName');
+      if(rEl) rEl.textContent=(emo[d.regime]||'')+' '+(d.regime||'–');
+    }
+  }catch(e){console.warn('Silent update error:',e)}
+}
+
+// ── UPDATE PNL ONLY (no full re-render) ──
+async function updatePositionPnlOnly(){
+  try{
+    const tickers=await api('/api/tickers');
+    // Update hanya PnL values yang sudah ada di DOM
+    document.querySelectorAll('.pos-card').forEach(card=>{
+      const pairEl = card.querySelector('.pos-pair-name');
+      const pnlEl  = card.querySelector('.pos-pnl');
+      const dirEl  = card.querySelector('.pos-dir');
+      if(!pairEl||!pnlEl||!dirEl) return;
+      const pair = pairEl.textContent.trim();
+      const isL  = dirEl.classList.contains('long');
+      const tick = tickers[pair]||{};
+      const cur  = tick.last||0;
+      if(!cur) return;
+      // Get entry from DOM
+      const entryEl = card.querySelectorAll('.pos-item-val')[0];
+      const sizeEl  = card.querySelectorAll('.pos-item-val')[3];
+      if(!entryEl||!sizeEl) return;
+      const entry = parseFloat(entryEl.textContent)||0;
+      const size  = parseFloat(sizeEl.textContent)||0;
+      if(!entry||!size) return;
+      const pnl = isL?(cur-entry)*size:(entry-cur)*size;
+      pnlEl.textContent = fPnl(pnl);
+      pnlEl.className   = 'pos-pnl '+(pnl>=0?'up':'dn');
+    });
+  }catch(e){}
 }
 
 // ── MINI CHART ─────────────────────────
@@ -1073,13 +1182,33 @@ function drawChart(prices,up){
   });
 }
 
-async function loadOHLCV(pair){
+let curTF = '15m';
+const TF_LIMITS = {'5m':80,'15m':60,'30m':48,'1h':48,'4h':60,'1d':60};
+
+async function loadOHLCV(pair, tf){
+  tf = tf || curTF;
+  const limit = TF_LIMITS[tf] || 60;
   try{
-    const d = await api('/api/ohlcv?pair='+pair+'&tf=15m&limit=60');
+    const d = await api('/api/ohlcv?pair='+pair+'&tf='+tf+'&limit='+limit);
     const candles = d.candles||[];
     if(candles.length < 2) return null;
-    return candles.map(c=>c.c); // close prices
+    return candles.map(c=>c.c);
   }catch(e){return null}
+}
+
+function changeTF(tf, el){
+  curTF = tf;
+  document.querySelectorAll('.tf-btn').forEach(b=>b.classList.remove('sel'));
+  if(el) el.classList.add('sel');
+  // Reload chart dengan TF baru
+  const tickers = {};
+  loadOHLCV(curPair, tf).then(prices=>{
+    if(prices && prices.length > 1){
+      const last = prices[prices.length-1];
+      const first = prices[0];
+      drawChart(prices, last >= first);
+    }
+  });
 }
 
 // ── LOAD MARKET ────────────────────────
@@ -1117,7 +1246,7 @@ async function loadMarket(){
       frEl.style.color=fr>0.001?'var(--red)':fr<-0.001?'var(--green)':'var(--muted2)';
 
       // Load real OHLCV untuk chart
-      loadOHLCV(curPair).then(prices=>{
+      loadOHLCV(curPair, curTF).then(prices=>{
         if(prices && prices.length>1){
           drawChart(prices,up);
         } else {
@@ -1166,6 +1295,8 @@ async function loadMarket(){
       const boost=d.regime_boost||0;
       const eff=min+boost;
       document.getElementById('confMinLbl').textContent='Min: '+eff;
+    // Update slider default
+    try{document.getElementById('scoreSlider').value=min;}catch(e){}
       document.getElementById('confPhase').textContent=min<=15?'Demo P1':'Live';
     }
 
@@ -1194,19 +1325,31 @@ async function loadLatestSignalScore(){
       bigEl.textContent=score;
       const pct=Math.min(100,(score/24)*100);
       barEl.style.width=pct+'%';
-      if(score>=18){bigEl.className='conf-score-big';barEl.style.background='var(--green)'}
-      else if(score>=eff){bigEl.className='conf-score-big warn';barEl.style.background='var(--yellow)'}
-      else{bigEl.className='conf-score-big danger';barEl.style.background='var(--red)'}
-
-      if(score>=eff){
-        btnEl.className='btn-entry ok';btnEl.textContent='ENTRY OK — OPEN TRADE';
+      // Color logic: merah jika di bawah min, kuning jika pas, hijau jika 18+
+      if(score>=18){
+        bigEl.className='conf-score-big';
+        barEl.style.background='var(--green)';
+      } else if(score>=eff){
+        bigEl.className='conf-score-big warn';
+        barEl.style.background='var(--yellow)';
       } else {
-        btnEl.className='btn-entry wait';btnEl.textContent='MENUNGGU SIGNAL ('+score+'/'+eff+')';
+        bigEl.className='conf-score-big danger';
+        barEl.style.background='var(--red)';
+      }
+      // Tombol HANYA hijau kalau score >= effective min
+      if(score>=eff){
+        btnEl.className='btn-entry ok';
+        btnEl.textContent='ENTRY OK — OPEN TRADE ('+score+'/'+eff+')';
+      } else {
+        btnEl.className='btn-entry wait';
+        btnEl.textContent='MENUNGGU SIGNAL ('+score+'/'+eff+')';
       }
     } else {
-      bigEl.textContent='–';bigEl.className='conf-score-big';
+      bigEl.textContent='–';
+      bigEl.className='conf-score-big';
       barEl.style.width='0%';
-      btnEl.className='btn-entry wait';btnEl.textContent='TIDAK ADA POSISI AKTIF';
+      btnEl.className='btn-entry wait';
+      btnEl.textContent='TIDAK ADA POSISI AKTIF';
     }
 
     // Breakdown from positions
@@ -1765,12 +1908,17 @@ function filterHist(type){
 // ── INIT ───────────────────────────────
 function initApp(){
   loadMarket();
-  setInterval(loadMarket,30000);
+  // Refresh market data setiap 30 detik (hanya update nilai, tidak re-render DOM)
   setInterval(()=>{
-    if(document.getElementById('sec-positions').classList.contains('active')) loadPositions();
-    if(document.getElementById('sec-settings').classList.contains('active')) updateKillzoneTimers();
-  },1000);
-  setInterval(updateKillzoneTimers,1000);
+    if(!document.hidden) loadMarketSilent();
+  }, 30000);
+  // Update PnL posisi setiap 10 detik tanpa re-render full
+  setInterval(()=>{
+    if(document.getElementById('sec-positions').classList.contains('active') && !document.hidden){
+      updatePositionPnlOnly();
+    }
+  }, 10000);
+  setInterval(updateKillzoneTimers, 1000);
   // Load settings jika tab active
   const origSwitch = window.switchTab;
   window.switchTab = function(t){

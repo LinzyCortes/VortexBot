@@ -54,7 +54,7 @@ def find_db_file() -> str:
 
 def backup_to_telegram(manual: bool = False) -> bool:
     """Kirim file database ke Telegram — tidak perlu setup tambahan"""
-    token   = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("BOT_TOKEN", ""))
+    token   = os.getenv("TELEGRAM_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("BOT_TOKEN", "")))
     chat_id = os.getenv("TELEGRAM_CHAT_ID",   os.getenv("CHAT_ID",   ""))
 
     if not token or not chat_id:
@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
     if args.test:
         print("Testing backup connections...")
-        token   = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("BOT_TOKEN",""))
+        token   = os.getenv("TELEGRAM_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("BOT_TOKEN","")))
         chat_id = os.getenv("TELEGRAM_CHAT_ID",   os.getenv("CHAT_ID",""))
         print(f"Telegram token: {'✅ ada' if token else '❌ tidak ada'}")
         print(f"Telegram chat_id: {'✅ ada' if chat_id else '❌ tidak ada'}")

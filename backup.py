@@ -144,7 +144,8 @@ def backup_to_gdrive(manual: bool = False):
         uploaded = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields="id,name,size"
+            fields="id,name,size",
+            supportsAllDrives=True
         ).execute()
 
         size_kb = int(uploaded.get("size", 0)) // 1024

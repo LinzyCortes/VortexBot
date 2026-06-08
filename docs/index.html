@@ -687,14 +687,17 @@ html,body{
 
   <!-- ═══ STATS TAB ═══ -->
   <div class="sec" id="sec-stats">
-    <div class="sec-title">Stats Keseluruhan</div>
-    <div class="mstat-row">
+
+    <!-- Quick Stats Row -->
+    <div class="mstat-row" id="quickStats">
       <div class="mstat"><div class="mstat-l">Total</div><div class="mstat-v" id="sTot">–</div></div>
       <div class="mstat"><div class="mstat-l">Win</div><div class="mstat-v" style="color:var(--green)" id="sWin">–</div></div>
       <div class="mstat"><div class="mstat-l">Loss</div><div class="mstat-v" style="color:var(--red)" id="sLoss">–</div></div>
       <div class="mstat"><div class="mstat-l">WR%</div><div class="mstat-v" id="sWR">–</div></div>
     </div>
-    <div class="stats-grid">
+
+    <!-- Balance + PnL cards -->
+    <div class="stats-grid" style="margin-bottom:10px">
       <div class="stat-card">
         <div class="stat-lbl">Balance</div>
         <div class="stat-val" id="sBal">–</div>
@@ -711,34 +714,128 @@ html,body{
         <div class="stat-sub">All time</div>
       </div>
       <div class="stat-card">
-        <div class="stat-lbl">Best RR</div>
-        <div class="stat-val" style="color:var(--green)" id="sBestRR">–</div>
-        <div class="stat-sub" id="sAvgScore">–</div>
+        <div class="stat-lbl">Profit Factor</div>
+        <div class="stat-val" style="color:var(--blue)" id="sPF">–</div>
+        <div class="stat-sub">Gross P / Gross L</div>
       </div>
     </div>
-    <div class="info-row">
-      <div class="info-card">
-        <div class="info-label">Weekly P&L</div>
-        <div class="regime-val" id="sWeekly">–</div>
+
+    <!-- Advanced Stats -->
+    <div class="breakdown-card" style="margin-bottom:10px">
+      <div class="breakdown-title">Performance Metrics</div>
+      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Max Drawdown</div></div><div class="bd-pts warn" id="sMaxDD">–</div></div>
+      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Best RR</div></div><div class="bd-pts on" id="sBestRR">–</div></div>
+      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Avg Score</div></div><div class="bd-pts on" id="sAvgScore">–</div></div>
+      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Avg Duration</div></div><div class="bd-pts on" id="sAvgDur">–</div></div>
+      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Max Consec. Wins</div></div><div class="bd-pts on" id="sMaxWins">–</div></div>
+      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Max Consec. Losses</div></div><div class="bd-pts warn" id="sMaxLoss">–</div></div>
+      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Weekly P&L</div></div><div class="bd-pts on" id="sWeekly">–</div></div>
+      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Monthly P&L</div></div><div class="bd-pts on" id="sMonthly">–</div></div>
+    </div>
+
+    <!-- Equity Curve Chart -->
+    <div class="breakdown-card" style="margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div class="breakdown-title" style="margin-bottom:0">Equity Curve</div>
+        <div style="display:flex;gap:6px">
+          <button onclick="setEquityMode('equity')" id="btnEqCurve" style="font-size:10px;padding:3px 8px;border-radius:4px;font-family:var(--font);cursor:pointer;background:var(--blue-glow);color:var(--blue);border:1px solid rgba(59,126,255,.4)">Balance</button>
+          <button onclick="setEquityMode('dd')" id="btnEqDD" style="font-size:10px;padding:3px 8px;border-radius:4px;font-family:var(--font);cursor:pointer;background:var(--bg4);color:var(--muted2);border:1px solid var(--border)">Drawdown</button>
+          <button onclick="setEquityMode('pnl')" id="btnEqPnl" style="font-size:10px;padding:3px 8px;border-radius:4px;font-family:var(--font);cursor:pointer;background:var(--bg4);color:var(--muted2);border:1px solid var(--border)">PnL/trade</button>
+        </div>
       </div>
-      <div class="info-card">
-        <div class="info-label">Monthly P&L</div>
-        <div class="regime-val" id="sMonthly">–</div>
+      <div style="height:120px;position:relative"><canvas id="equityChart"></canvas></div>
+    </div>
+
+    <!-- Per-Pair Stats -->
+    <div class="breakdown-card" style="margin-bottom:10px">
+      <div class="breakdown-title">Performance Per Pair</div>
+      <div id="pairStats">
+        <div class="loading-wrap"><div class="spinner"></div>Loading...</div>
       </div>
     </div>
-    <div class="info-row">
-      <div class="info-card">
-        <div class="info-label">Open Trades</div>
-        <div class="regime-val" id="sOpen">–</div>
+
+    <!-- Best Hours Chart -->
+    <div class="breakdown-card" style="margin-bottom:10px">
+      <div class="breakdown-title">Win Rate per Jam (WIB)</div>
+      <div style="height:90px;position:relative"><canvas id="hourlyChart"></canvas></div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px;text-align:center">London KZ: 15–17 · NY KZ: 20–23</div>
+    </div>
+
+    <!-- Target Progress -->
+    <div class="breakdown-card" style="margin-bottom:10px">
+      <div class="breakdown-title">Progress Menuju Live</div>
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px">
+          <span style="color:var(--muted2)">Min Score</span>
+          <span id="progScoreLabel" style="color:var(--blue)">15/18</span>
+        </div>
+        <div style="background:var(--bg4);border-radius:4px;height:8px;overflow:hidden">
+          <div id="progScoreBar" style="height:100%;background:var(--blue);border-radius:4px;transition:width .5s;width:0%"></div>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">Demo P1 (15) → Live (18)</div>
       </div>
-      <div class="info-card">
-        <div class="info-label">Cap Mode</div>
-        <div class="regime-val" id="sCapMode">–</div>
+      <div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px">
+          <span style="color:var(--muted2)">Win Rate</span>
+          <span id="progWRLabel" style="color:var(--green)">–</span>
+        </div>
+        <div style="background:var(--bg4);border-radius:4px;height:8px;overflow:hidden">
+          <div id="progWRBar" style="height:100%;background:var(--green);border-radius:4px;transition:width .5s;width:0%"></div>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">Target live: WR ≥ 55%</div>
       </div>
     </div>
+
+    <!-- Risk Calculator -->
+    <div class="breakdown-card" style="margin-bottom:10px">
+      <div class="breakdown-title">Risk Calculator</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:4px">ENTRY</div>
+          <input class="form-inp" id="rcEntry" type="number" placeholder="Harga entry" step="any" style="font-size:12px;padding:8px 10px" oninput="calcRisk()">
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:4px">STOP LOSS</div>
+          <input class="form-inp" id="rcSL" type="number" placeholder="Harga SL" step="any" style="font-size:12px;padding:8px 10px" oninput="calcRisk()">
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px">
+        <button onclick="rcSetDir('BUY')" id="rcLong" class="dir-btn">▲ Long</button>
+        <button onclick="rcSetDir('SELL')" id="rcShort" class="dir-btn">▼ Short</button>
+        <select class="form-sel" id="rcPair" style="font-size:11px;padding:7px 8px" onchange="calcRisk()">
+          <option value="ETH-USDT-SWAP">ETH</option>
+          <option value="BNB-USDT-SWAP">BNB</option>
+          <option value="AAVE-USDT-SWAP">AAVE</option>
+        </select>
+      </div>
+      <div id="rcResult" style="display:none">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px">
+          <div style="background:var(--bg3);border-radius:6px;padding:8px;text-align:center">
+            <div style="font-size:9px;color:var(--green);margin-bottom:2px">TP1 (RR1:1)</div>
+            <div style="font-size:12px;font-weight:700" id="rcTP1">–</div>
+          </div>
+          <div style="background:var(--bg3);border-radius:6px;padding:8px;text-align:center">
+            <div style="font-size:9px;color:var(--cyan);margin-bottom:2px">TP2 (RR1:2)</div>
+            <div style="font-size:12px;font-weight:700" id="rcTP2">–</div>
+          </div>
+          <div style="background:var(--bg3);border-radius:6px;padding:8px;text-align:center">
+            <div style="font-size:9px;color:var(--blue);margin-bottom:2px">TP3 (RR1:3)</div>
+            <div style="font-size:12px;font-weight:700" id="rcTP3">–</div>
+          </div>
+        </div>
+        <div style="background:var(--bg3);border-radius:8px;padding:10px;margin-bottom:8px">
+          <div style="font-size:10px;color:var(--muted2);margin-bottom:6px">SL Distance: <span id="rcSLDist" style="color:var(--red)">–</span> (<span id="rcSLPct" style="color:var(--red)">–</span>%)</div>
+          <div style="font-size:10px;color:var(--muted2)">Risk Amount: <span id="rcRiskAmt" style="color:var(--yellow);font-weight:700">–</span></div>
+        </div>
+        <div class="breakdown-title" style="margin-bottom:6px">Position Sizing</div>
+        <div id="rcScenarios"></div>
+      </div>
+      <div id="rcLoading" style="font-size:11px;color:var(--muted);text-align:center;padding:8px">Isi entry dan SL untuk kalkulasi</div>
+    </div>
+
   </div>
 
-  <!-- ═══ STRATEGY TAB ═══ -->
+    <!-- ═══ STRATEGY TAB ═══ -->
   <div class="sec" id="sec-strategy">
     <div class="strat-card">
       <div class="strat-head">Core SMC</div>
@@ -817,57 +914,53 @@ html,body{
     <!-- BOT CONTROL -->
     <div class="sec-title">Bot Control</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
-      <button class="btn-pos" style="padding:12px;background:var(--yellow-bg);color:var(--yellow);border:1px solid rgba(245,166,35,.3);border-radius:var(--radius-sm);font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer" onclick="pauseBot()">⏸ Pause Bot</button>
-      <button class="btn-pos" style="padding:12px;background:var(--green-bg);color:var(--green);border:1px solid var(--green-border);border-radius:var(--radius-sm);font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer" onclick="resumeBot()">▶ Resume Bot</button>
+      <button class="btn-pos" onclick="pauseBot()" style="padding:12px;background:var(--yellow-bg);color:var(--yellow);border:1px solid rgba(245,166,35,.3);border-radius:var(--radius-sm);font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer">⏸ Pause 1j</button>
+      <button class="btn-pos" onclick="resumeBot()" style="padding:12px;background:var(--green-bg);color:var(--green);border:1px solid var(--green-border);border-radius:var(--radius-sm);font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer">▶ Resume</button>
     </div>
 
-    <!-- MIN SCORE -->
+    <!-- LIVE CONFIG CONTROL -->
     <div class="breakdown-card" style="margin-bottom:10px">
-      <div class="breakdown-title">Confluence Score Threshold</div>
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
-        <div style="flex:1">
-          <input type="range" id="scoreSlider" min="12" max="22" value="15"
-            style="width:100%;accent-color:var(--blue)"
-            oninput="document.getElementById('scoreVal').textContent=this.value">
+      <div class="breakdown-title">Config Bot — Live Control</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:10px">Perubahan aktif langsung. Update Railway Variables untuk permanen.</div>
+
+      <!-- Min Score -->
+      <div style="margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div style="font-size:11px;color:var(--muted2)">Min Confluence Score</div>
+          <div style="font-size:16px;font-weight:800;color:var(--blue)" id="scoreVal">15</div>
         </div>
-        <div style="font-size:22px;font-weight:800;color:var(--blue);min-width:40px;text-align:center" id="scoreVal">15</div>
-        <div style="font-size:11px;color:var(--muted)">/24</div>
+        <input type="range" id="scoreSlider" min="12" max="22" value="15"
+          style="width:100%;accent-color:var(--blue)"
+          oninput="document.getElementById('scoreVal').textContent=this.value">
+        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--muted);margin-top:4px">
+          <span>12</span><span style="color:var(--green)">Demo:15</span><span style="color:var(--yellow)">Live:18</span><span style="color:var(--red)">Strict:20</span><span>22</span>
+        </div>
+        <button onclick="applyScore()" style="width:100%;margin-top:8px;padding:8px;background:var(--blue-glow);color:var(--blue);border:1px solid rgba(59,126,255,.3);border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;cursor:pointer">Apply Score</button>
       </div>
-      <div style="display:flex;gap:6px">
-        <div style="flex:1;text-align:center;padding:6px;background:var(--bg4);border-radius:6px;font-size:10px;color:var(--muted2)">Demo P1<br><span style="color:var(--green);font-weight:700">15</span></div>
-        <div style="flex:1;text-align:center;padding:6px;background:var(--bg4);border-radius:6px;font-size:10px;color:var(--muted2)">Live<br><span style="color:var(--yellow);font-weight:700">18</span></div>
-        <div style="flex:1;text-align:center;padding:6px;background:var(--bg4);border-radius:6px;font-size:10px;color:var(--muted2)">Strict<br><span style="color:var(--red);font-weight:700">20</span></div>
+
+      <div style="height:1px;background:var(--border);margin-bottom:12px"></div>
+
+      <!-- Toggle switches -->
+      <div id="configToggles">
+        <div class="loading-wrap"><div class="spinner"></div>Loading...</div>
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:8px">⚠ Ubah MIN_CONFLUENCE_SCORE di Railway Variables — tidak bisa diubah live via API tanpa restart bot.</div>
     </div>
 
     <!-- KILLZONE TIMER -->
     <div class="breakdown-card" style="margin-bottom:10px">
       <div class="breakdown-title">Killzone Timer</div>
-      <div id="kzTimerWrap">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-          <div style="background:var(--bg3);border-radius:8px;padding:10px;text-align:center">
-            <div style="font-size:10px;color:var(--cyan);margin-bottom:4px">🇬🇧 London</div>
-            <div style="font-size:11px;color:var(--muted2)">15:00 – 17:30 WIB</div>
-            <div style="font-size:16px;font-weight:800;margin-top:4px;color:var(--text)" id="londonTimer">–</div>
-          </div>
-          <div style="background:var(--bg3);border-radius:8px;padding:10px;text-align:center">
-            <div style="font-size:10px;color:var(--yellow);margin-bottom:4px">🇺🇸 New York</div>
-            <div style="font-size:11px;color:var(--muted2)">20:30 – 23:00 WIB</div>
-            <div style="font-size:16px;font-weight:800;margin-top:4px;color:var(--text)" id="nyTimer">–</div>
-          </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div style="background:var(--bg3);border-radius:8px;padding:10px;text-align:center">
+          <div style="font-size:10px;color:var(--cyan);margin-bottom:3px">🇬🇧 London KZ</div>
+          <div style="font-size:10px;color:var(--muted2);margin-bottom:5px">15:00–17:30 WIB</div>
+          <div style="font-size:18px;font-weight:800;color:var(--text)" id="londonTimer">–</div>
+        </div>
+        <div style="background:var(--bg3);border-radius:8px;padding:10px;text-align:center">
+          <div style="font-size:10px;color:var(--yellow);margin-bottom:3px">🇺🇸 New York KZ</div>
+          <div style="font-size:10px;color:var(--muted2);margin-bottom:5px">20:30–23:00 WIB</div>
+          <div style="font-size:18px;font-weight:800;color:var(--text)" id="nyTimer">–</div>
         </div>
       </div>
-    </div>
-
-    <!-- DATABASE BACKUP -->
-    <div class="breakdown-card" style="margin-bottom:10px">
-      <div class="breakdown-title">Database Backup</div>
-      <div style="font-size:11px;color:var(--muted2);margin-bottom:10px">Backup database bot ke Google Drive otomatis setiap hari. Setup sekali, jalan terus.</div>
-      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Auto backup harian (07:00 WIB)</div></div><div class="bd-pts on">ON</div></div>
-      <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Backup sebelum Railway restart</div></div><div class="bd-pts on">ON</div></div>
-      <div class="bd-item" id="lastBackupRow"><div class="bd-left"><div class="bd-dot warn"></div><div class="bd-name">Last backup</div></div><div class="bd-pts warn" id="lastBackupTime">–</div></div>
-      <button onclick="triggerBackup()" style="width:100%;margin-top:10px;padding:10px;background:var(--blue-glow);color:var(--blue);border:1px solid rgba(59,126,255,.3);border-radius:8px;font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer">↑ Backup Sekarang</button>
     </div>
 
     <!-- BOT INFO -->
@@ -878,14 +971,26 @@ html,body{
       </div>
     </div>
 
+    <!-- DATABASE BACKUP -->
+    <div class="breakdown-card" style="margin-bottom:10px">
+      <div class="breakdown-title">Database Backup</div>
+      <div style="font-size:11px;color:var(--muted2);margin-bottom:10px">Backup otomatis jam 07:00 WIB via Telegram. File .db dikirim ke chat bot kamu.</div>
+      <div class="bd-item" id="lastBackupRow">
+        <div class="bd-left"><div class="bd-dot warn"></div><div class="bd-name">Last backup</div></div>
+        <div class="bd-pts warn" id="lastBackupTime">–</div>
+      </div>
+      <button onclick="triggerBackup()" style="width:100%;margin-top:10px;padding:10px;background:var(--blue-glow);color:var(--blue);border:1px solid rgba(59,126,255,.3);border-radius:8px;font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer">↑ Backup Sekarang</button>
+    </div>
+
     <!-- DANGER ZONE -->
-    <div style="background:var(--red-bg);border:1px solid var(--red-border);border-radius:var(--radius);padding:14px;margin-bottom:10px">
+    <div style="background:var(--red-bg);border:1px solid var(--red-border);border-radius:var(--radius);padding:14px;margin-bottom:16px">
       <div style="font-size:10px;font-weight:700;color:var(--red);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">⚠ Danger Zone</div>
       <button onclick="pauseBot24()" style="width:100%;padding:10px;background:transparent;color:var(--red);border:1px solid var(--red-border);border-radius:8px;font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer;margin-bottom:8px">Pause Bot 24 Jam</button>
-      <div style="font-size:10px;color:var(--muted)">Bot akan berhenti scan signal selama 24 jam. Posisi yang sudah terbuka tetap di-monitor.</div>
+      <div style="font-size:10px;color:var(--muted)">Bot berhenti scan signal 24 jam. Posisi aktif tetap di-monitor.</div>
     </div>
 
   </div>
+
 
 </div><!-- /content -->
 
@@ -1514,7 +1619,7 @@ async function loadHistory(){
       const pnl=t.pnl||0;
       const isL=(t.direction||'').toUpperCase()==='BUY'||(t.direction||'').toUpperCase()==='LONG';
       const dur=t.duration_minutes?Math.floor(t.duration_minutes)+'m':'–';
-      return`<div class="hist-item">
+      const _tid=t.trade_id||t.id||'';return`<div class="hist-item" onclick="showJournal('${_tid}')" style="cursor:pointer">
         <div>
           <div class="hist-pair">${t.pair||'–'}</div>
           <div class="hist-dir ${isL?'l':'s'}">${isL?'▲ LONG':'▼ SHORT'}</div>
@@ -1533,9 +1638,20 @@ async function loadHistory(){
 }
 
 // ── STATS ──────────────────────────────
+// ── ANALYTICS STATE ────────────────────
+let analyticsData = null;
+let equityChartInst = null;
+let hourlyChartInst = null;
+let equityMode = 'equity';
+let rcDir = 'BUY';
+
 async function loadStats(){
   try{
-    const [stats,bal]=await Promise.allSettled([api('/api/stats'),api('/api/balance')]);
+    const [stats, bal, analytics] = await Promise.allSettled([
+      api('/api/stats'), api('/api/balance'), api('/api/analytics')
+    ]);
+
+    // Basic stats
     if(stats.status==='fulfilled'){
       const d=stats.value;
       const wr=d.total_trades>0?f(d.wins/d.total_trades*100,1)+'%':'–';
@@ -1545,17 +1661,31 @@ async function loadStats(){
       document.getElementById('sWR').textContent=wr;
       const tpEl=document.getElementById('sTodayPnl');
       tpEl.textContent=fUSD(d.today_pnl||0);
-      tpEl.className='stat-val '+(d.today_pnl>=0?'':'');
-      tpEl.style.color=d.today_pnl>=0?'var(--green)':'var(--red)';
+      tpEl.style.color=(d.today_pnl||0)>=0?'var(--green)':'var(--red)';
       document.getElementById('sTodayTrades').textContent=`${d.today_wins||0}W ${d.today_losses||0}L hari ini`;
       const totEl=document.getElementById('sTotalPnl');
       totEl.textContent=fUSD(d.total_pnl||0);
       totEl.style.color=(d.total_pnl||0)>=0?'var(--green)':'var(--red)';
-      document.getElementById('sBestRR').textContent=d.best_rr?'1:'+f(d.best_rr,1):'–';
-      document.getElementById('sAvgScore').textContent=d.avg_score?'Avg score: '+f(d.avg_score,0)+'/24':'–';
-      document.getElementById('sOpen').textContent=d.open_trades||0;
-      document.getElementById('sCapMode').textContent=d.cap_mode||'–';
+      const sBR=document.getElementById('sBestRR');
+      if(sBR) sBR.textContent=d.best_rr?'1:'+f(d.best_rr,1):'–';
+      const sAS=document.getElementById('sAvgScore');
+      if(sAS) sAS.textContent=d.avg_score?f(d.avg_score,0)+'/24':'–';
+      // Progress bars
+      const minScore=d.min_score||15;
+      const curScore=d.base_score||15;
+      const scorePct=Math.min(100,(curScore/18)*100);
+      const wrNum=d.total_trades>0?(d.wins/d.total_trades*100):0;
+      const wrPct=Math.min(100,(wrNum/55)*100);
+      const psb=document.getElementById('progScoreBar');
+      const psl=document.getElementById('progScoreLabel');
+      const pwb=document.getElementById('progWRBar');
+      const pwl=document.getElementById('progWRLabel');
+      if(psb){psb.style.width=scorePct+'%';psb.style.background=curScore>=18?'var(--green)':'var(--blue)';}
+      if(psl) psl.textContent=curScore+'/18';
+      if(pwb){pwb.style.width=wrPct+'%';pwb.style.background=wrNum>=55?'var(--green)':'var(--yellow)';}
+      if(pwl){pwl.textContent=f(wrNum,1)+'%';pwl.style.color=wrNum>=55?'var(--green)':'var(--yellow)';}
     }
+
     if(bal.status==='fulfilled'){
       const d=bal.value;
       document.getElementById('sBal').textContent=fUSD(d.balance||0);
@@ -1563,14 +1693,264 @@ async function loadStats(){
       sub.textContent='Hari ini: '+fPnl(d.today_pnl||0);
       sub.className='stat-sub '+(d.today_pnl>=0?'up':'dn');
       const wEl=document.getElementById('sWeekly');
-      wEl.textContent=fPnl(d.weekly_pnl||0);
-      wEl.style.color=(d.weekly_pnl||0)>=0?'var(--green)':'var(--red)';
+      if(wEl){wEl.textContent=fPnl(d.weekly_pnl||0);wEl.style.color=(d.weekly_pnl||0)>=0?'var(--green)':'var(--red)';}
       const mEl=document.getElementById('sMonthly');
-      mEl.textContent=fPnl(d.monthly_pnl||0);
-      mEl.style.color=(d.monthly_pnl||0)>=0?'var(--green)':'var(--red)';
+      if(mEl){mEl.textContent=fPnl(d.monthly_pnl||0);mEl.style.color=(d.monthly_pnl||0)>=0?'var(--green)':'var(--red)';}
+    }
+
+    // Analytics
+    if(analytics.status==='fulfilled'){
+      analyticsData=analytics.value;
+      const d=analyticsData;
+
+      // Advanced metrics
+      const sDD=document.getElementById('sMaxDD');
+      if(sDD){sDD.textContent=f(d.max_drawdown_pct,2)+'%';sDD.style.color=d.max_drawdown_pct>10?'var(--red)':'var(--yellow)';}
+      const sPF=document.getElementById('sPF');
+      if(sPF){sPF.textContent=d.profit_factor||'–';sPF.style.color=(d.profit_factor||0)>=1?'var(--green)':'var(--red)';}
+      const sDur=document.getElementById('sAvgDur');
+      if(sDur){const dm=d.avg_duration_min||0;sDur.textContent=dm>=60?f(dm/60,1)+'h':f(dm,0)+'m';}
+      const smw=document.getElementById('sMaxWins');
+      if(smw) smw.textContent=d.max_consec_wins||0;
+      const sml=document.getElementById('sMaxLoss');
+      if(sml) sml.textContent=d.max_consec_losses||0;
+
+      // Equity chart
+      drawEquityChart(d, equityMode);
+
+      // Per-pair stats
+      renderPairStats(d.per_pair||{});
+
+      // Hourly chart
+      drawHourlyChart(d.hourly||{});
     }
   }catch(e){console.error('loadStats',e)}
 }
+
+// ── EQUITY CHART ───────────────────────
+function drawEquityChart(data, mode){
+  const ctx=document.getElementById('equityChart');
+  if(!ctx) return;
+  if(equityChartInst){equityChartInst.destroy();equityChartInst=null;}
+
+  let points, color, label;
+  if(mode==='equity'){
+    points=(data.equity_curve||[]).map(p=>({x:p.t,y:p.v}));
+    const last=(points[points.length-1]||{}).y||0;
+    color=last>=0?'#00d08a':'#ff4d6a';
+    label='Balance';
+  } else if(mode==='dd'){
+    points=(data.drawdown||[]).map(p=>({x:p.t,y:p.v}));
+    color='#ff4d6a'; label='Drawdown %';
+  } else {
+    points=(data.equity_curve||[]).map(p=>({x:p.t,y:p.pnl}));
+    color='#3b7eff'; label='PnL/trade';
+  }
+
+  if(!points.length){
+    ctx.getContext('2d').clearRect(0,0,ctx.width,ctx.height);
+    return;
+  }
+
+  equityChartInst=new Chart(ctx,{
+    type:'line',
+    data:{
+      labels:points.map(p=>p.x),
+      datasets:[{
+        label,data:points.map(p=>p.y),
+        borderColor:color,borderWidth:1.5,
+        fill:true,
+        backgroundColor:(c=>{
+          const g=c.chart.ctx.createLinearGradient(0,0,0,120);
+          g.addColorStop(0,color.replace(')',',0.18)').replace('rgb','rgba').replace('#00d08a','rgba(0,208,138,0.18)').replace('#ff4d6a','rgba(255,77,106,0.18)').replace('#3b7eff','rgba(59,126,255,0.18)'));
+          g.addColorStop(1,'rgba(0,0,0,0)');
+          const colorMap={'#00d08a':'rgba(0,208,138,0.18)','#ff4d6a':'rgba(255,77,106,0.18)','#3b7eff':'rgba(59,126,255,0.18)'};
+          return colorMap[color]||'rgba(59,126,255,0.1)';
+        }),
+        tension:.35,pointRadius:0,
+      }]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{
+        backgroundColor:'rgba(19,22,30,.95)',borderColor:color,borderWidth:1,
+        titleColor:'#8891a8',bodyColor:color,
+        titleFont:{size:9},bodyFont:{size:11,weight:'700'},
+        callbacks:{label:c=>'$'+c.raw.toFixed(4)}
+      }},
+      scales:{x:{display:false},y:{
+        display:true,
+        ticks:{color:'#5a6278',font:{size:9},maxTicksLimit:4,
+          callback:v=>v>=1000?'$'+Math.round(v/1000)+'k':'$'+v.toFixed(2)},
+        grid:{color:'rgba(255,255,255,.04)'},
+      }},
+      animation:{duration:400},
+      interaction:{mode:'nearest',axis:'x',intersect:false}
+    }
+  });
+}
+
+function setEquityMode(mode){
+  equityMode=mode;
+  ['equity','dd','pnl'].forEach(m=>{
+    const btn=document.getElementById('btnEq'+{equity:'Curve',dd:'DD',pnl:'Pnl'}[m]);
+    if(!btn) return;
+    const active=m===mode;
+    btn.style.background=active?'var(--blue-glow)':'var(--bg4)';
+    btn.style.color=active?'var(--blue)':'var(--muted2)';
+    btn.style.borderColor=active?'rgba(59,126,255,.4)':'var(--border)';
+  });
+  if(analyticsData) drawEquityChart(analyticsData, mode);
+}
+
+// ── PER-PAIR STATS ─────────────────────
+function renderPairStats(perPair){
+  const el=document.getElementById('pairStats');
+  if(!el) return;
+  const pairs=Object.keys(perPair);
+  if(!pairs.length){
+    el.innerHTML='<div style="font-size:11px;color:var(--muted);padding:8px 0">Belum ada data</div>';
+    return;
+  }
+  el.innerHTML=pairs.map(pair=>{
+    const p=perPair[pair];
+    const base=pair.split('-')[0];
+    const wr=p.win_rate||0;
+    const wrColor=wr>=60?'var(--green)':wr>=50?'var(--yellow)':'var(--red)';
+    const pnlColor=p.total_pnl>=0?'var(--green)':'var(--red)';
+    return`<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+        <div style="font-size:13px;font-weight:700">${base}/USDT</div>
+        <div style="font-size:13px;font-weight:700;color:${pnlColor}">${fPnl(p.total_pnl)}</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px">
+        <div style="font-size:10px;color:var(--muted2)">Trades<br><span style="color:var(--text);font-weight:700">${p.trades}</span></div>
+        <div style="font-size:10px;color:var(--muted2)">WR%<br><span style="color:${wrColor};font-weight:700">${wr}%</span></div>
+        <div style="font-size:10px;color:var(--muted2)">Best RR<br><span style="color:var(--green);font-weight:700">1:${f(p.best_rr,1)}</span></div>
+        <div style="font-size:10px;color:var(--muted2)">Avg PnL<br><span style="color:${p.avg_pnl>=0?'var(--green)':'var(--red)'};font-weight:700">${fPnl(p.avg_pnl)}</span></div>
+      </div>
+      <div style="background:var(--bg4);border-radius:3px;height:4px;margin-top:6px;overflow:hidden">
+        <div style="height:100%;border-radius:3px;background:${wrColor};width:${Math.min(100,wr)}%;transition:width .5s"></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── HOURLY CHART ───────────────────────
+function drawHourlyChart(hourly){
+  const ctx=document.getElementById('hourlyChart');
+  if(!ctx) return;
+  if(hourlyChartInst){hourlyChartInst.destroy();hourlyChartInst=null;}
+
+  const hours=Array.from({length:24},(_,i)=>i);
+  const wrs=hours.map(h=>{
+    const d=hourly[h];
+    if(!d||!d.trades) return null;
+    return Math.round(d.wins/d.trades*100);
+  });
+  const colors=hours.map(h=>{
+    // Highlight killzone hours
+    const wr=wrs[h];
+    if(wr===null) return 'rgba(90,98,120,0.3)';
+    if((h>=15&&h<18)||(h>=20&&h<23)) return wr>=50?'rgba(0,208,138,0.7)':'rgba(255,77,106,0.7)';
+    return wr>=50?'rgba(0,208,138,0.4)':'rgba(255,77,106,0.4)';
+  });
+
+  hourlyChartInst=new Chart(ctx,{
+    type:'bar',
+    data:{
+      labels:hours.map(h=>h+':00'),
+      datasets:[{
+        data:wrs.map(v=>v??0),
+        backgroundColor:colors,
+        borderRadius:2,
+      }]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{
+        backgroundColor:'rgba(19,22,30,.95)',
+        callbacks:{
+          title:c=>`${c[0].label} WIB`,
+          label:c=>{
+            const h=c.dataIndex;
+            const d=hourly[h];
+            if(!d||!d.trades) return 'Tidak ada data';
+            return [`WR: ${c.raw}%`,`${d.trades} trade (${d.wins}W/${d.losses}L)`];
+          }
+        }
+      }},
+      scales:{
+        x:{ticks:{color:'#5a6278',font:{size:8},maxRotation:0},grid:{display:false}},
+        y:{display:true,min:0,max:100,
+          ticks:{color:'#5a6278',font:{size:9},callback:v=>v+'%',maxTicksLimit:3},
+          grid:{color:'rgba(255,255,255,.04)'}
+        }
+      },
+      animation:{duration:400}
+    }
+  });
+}
+
+// ── RISK CALCULATOR ────────────────────
+let rcData = null;
+
+function rcSetDir(dir){
+  rcDir=dir;
+  document.getElementById('rcLong').className='dir-btn'+(dir==='BUY'?' sel-long':'');
+  document.getElementById('rcShort').className='dir-btn'+(dir==='SELL'?' sel-short':'');
+  calcRisk();
+}
+
+async function calcRisk(){
+  const entry=parseFloat(document.getElementById('rcEntry').value)||0;
+  const sl=parseFloat(document.getElementById('rcSL').value)||0;
+  const pair=document.getElementById('rcPair').value;
+  const loadEl=document.getElementById('rcLoading');
+  const resEl=document.getElementById('rcResult');
+
+  if(!sl){
+    if(resEl) resEl.style.display='none';
+    if(loadEl) loadEl.style.display='block';
+    return;
+  }
+
+  try{
+    const url=`/api/risk_calc?pair=${pair}&entry=${entry||0}&sl=${sl}&direction=${rcDir}`;
+    const d=await api(url);
+    rcData=d;
+    if(d.error){
+      if(loadEl) loadEl.textContent=d.error;
+      return;
+    }
+
+    if(loadEl) loadEl.style.display='none';
+    if(resEl) resEl.style.display='block';
+
+    const dec=d.entry>100?2:4;
+    document.getElementById('rcTP1').textContent=f(d.tp1,dec);
+    document.getElementById('rcTP2').textContent=f(d.tp2,dec);
+    document.getElementById('rcTP3').textContent=f(d.tp3,dec);
+    document.getElementById('rcSLDist').textContent=f(d.sl_dist,dec);
+    document.getElementById('rcSLPct').textContent=f(d.sl_pct,3);
+    document.getElementById('rcRiskAmt').textContent=fUSD(d.risk_amount)+' ('+f(d.risk_amount/d.balance*100,2)+'%)';
+
+    const scEl=document.getElementById('rcScenarios');
+    if(scEl){
+      scEl.innerHTML=(d.scenarios||[]).map(s=>`
+        <div style="display:grid;grid-template-columns:50px 1fr 1fr 1fr;gap:6px;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--blue);font-weight:700">${s.leverage}x</div>
+          <div style="font-size:10px;color:var(--muted2)">Qty<br><span style="color:var(--text);font-weight:700">${f(s.quantity,4)}</span></div>
+          <div style="font-size:10px;color:var(--muted2)">Pos USDT<br><span style="color:var(--text);font-weight:700">${fUSD(s.position_usdt)}</span></div>
+          <div style="font-size:10px;color:var(--muted2)">Risk<br><span style="color:var(--yellow);font-weight:700">${fUSD(s.risk_usdt)}</span></div>
+        </div>`).join('');
+    }
+  }catch(e){
+    if(loadEl){loadEl.style.display='block';loadEl.textContent='Gagal load kalkulasi';}
+  }
+}
+
+
 
 // ── OPEN TRADE ─────────────────────────
 function selDir(d){
@@ -1671,44 +2051,168 @@ function checkPass(){
 // ── SETTINGS ───────────────────────────
 
 async function loadSettings(){
-  // Load bot info
   try{
-    const [status, bal] = await Promise.allSettled([api('/api/status'), api('/api/balance')]);
-    const el = document.getElementById('settingsBotInfo');
+    const [status, config] = await Promise.allSettled([
+      api('/api/status'), api('/api/settings/config')
+    ]);
+
+    // Bot info
     if(status.status==='fulfilled'){
-      const d = status.value;
-      el.innerHTML = `
-        <div class="bd-item"><div class="bd-left"><div class="bd-dot ${d.running?'on':'off'}"></div><div class="bd-name">Status Bot</div></div><div class="bd-pts ${d.running?'on':'off'}">${d.running?'RUNNING':'STOPPED'}</div></div>
+      const d=status.value;
+      const el=document.getElementById('settingsBotInfo');
+      if(el) el.innerHTML=`
+        <div class="bd-item"><div class="bd-left"><div class="bd-dot ${d.running?'on':'off'}"></div><div class="bd-name">Status</div></div><div class="bd-pts ${d.running?'on':'off'}">${d.running?'RUNNING':'STOPPED'}</div></div>
         <div class="bd-item"><div class="bd-left"><div class="bd-dot ${d.paused?'warn':'on'}"></div><div class="bd-name">Paused</div></div><div class="bd-pts ${d.paused?'warn':'off'}">${d.paused?'YES':'NO'}</div></div>
         <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Exchange</div></div><div class="bd-pts on">${d.exchange||'–'}</div></div>
         <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Uptime</div></div><div class="bd-pts on">${d.uptime_hours?d.uptime_hours.toFixed(1)+'h':'–'}</div></div>
-        <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Min Score</div></div><div class="bd-pts on">${d.min_score||'–'}/24</div></div>
         <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Pairs</div></div><div class="bd-pts on">${(d.pairs||[]).join(', ')||'–'}</div></div>
-        <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">VWAP</div></div><div class="bd-pts ${d.vwap_enabled?'on':'off'}">${d.vwap_enabled?'ON':'OFF'}</div></div>
-        <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Funding Filter</div></div><div class="bd-pts ${d.funding_enabled?'on':'off'}">${d.funding_enabled?'ON':'OFF'}</div></div>
+        <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">TF</div></div><div class="bd-pts on">${d.tf_bias||'–'} / ${d.tf_setup||'–'} / ${d.tf_entry||'–'}</div></div>
         <div class="bd-item"><div class="bd-left"><div class="bd-dot on"></div><div class="bd-name">Last Scan</div></div><div class="bd-pts on">${d.last_scan||'–'}</div></div>
       `;
-      // Sync slider with current score
-      if(d.min_score){
-        document.getElementById('scoreSlider').value = d.min_score;
-        document.getElementById('scoreVal').textContent = d.min_score;
-      }
     }
-    // Last backup info
+
+    // Config toggles + number inputs
+    if(config.status==='fulfilled'){
+      const d=config.value;
+      // Sync score slider
+      const slider=document.getElementById('scoreSlider');
+      const scoreVal=document.getElementById('scoreVal');
+      if(slider&&d.MIN_CONFLUENCE_SCORE){
+        slider.value=d.MIN_CONFLUENCE_SCORE;
+        if(scoreVal) scoreVal.textContent=d.MIN_CONFLUENCE_SCORE;
+      }
+
+      const el=document.getElementById('configToggles');
+      if(el) el.innerHTML=`
+        ${cfgToggle('VWAP_ENABLED','VWAP Filter',d.VWAP_ENABLED)}
+        ${cfgToggle('FUNDING_RATE_ENABLED','Funding Rate Filter',d.FUNDING_RATE_ENABLED)}
+        ${cfgNumber('MIN_RR','Min Risk/Reward',d.MIN_RR,'e.g. 2.0')}
+        ${cfgNumber('RISK_PERCENT','Risk per Trade (%)',d.RISK_PERCENT,'e.g. 1.0')}
+        ${cfgNumber('ATR_SL_MULT','ATR SL Multiplier',d.ATR_SL_MULT,'e.g. 2.0')}
+        ${cfgNumber('VWAP_TOLERANCE_PCT','VWAP Tolerance %',d.VWAP_TOLERANCE_PCT,'e.g. 0.3')}
+        ${cfgNumber('FUNDING_RATE_MAX_LONG','Max Funding Long',d.FUNDING_RATE_MAX_LONG,'e.g. 0.05')}
+        ${cfgNumber('FUNDING_RATE_MAX_SHORT','Max Funding Short',d.FUNDING_RATE_MAX_SHORT,'e.g. -0.05')}
+      `;
+    }
+
+    // Last backup
     try{
-      const lastBackup = localStorage.getItem('vx_last_backup');
-      if(lastBackup){
-        document.getElementById('lastBackupTime').textContent = lastBackup;
-        document.querySelector('#lastBackupRow .bd-dot').className = 'bd-dot on';
-        document.getElementById('lastBackupTime').className = 'bd-pts on';
+      const lb=localStorage.getItem('vx_last_backup');
+      if(lb){
+        const el=document.getElementById('lastBackupTime');
+        const dot=document.querySelector('#lastBackupRow .bd-dot');
+        if(el){el.textContent=lb;el.className='bd-pts on';}
+        if(dot) dot.className='bd-dot on';
       }
     }catch(e){}
+
   }catch(e){
-    document.getElementById('settingsBotInfo').innerHTML='<div style="font-size:11px;color:var(--red)">Gagal load bot info</div>';
+    const el=document.getElementById('settingsBotInfo');
+    if(el) el.innerHTML='<div style="color:var(--red);font-size:11px">Gagal load settings</div>';
   }
 }
 
-// ── PAUSE / RESUME ──────────────────────
+function cfgToggle(key, label, value){
+  const checked=value===true||value==='true'||value==='1'||value==='yes';
+  return`<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+    <div style="font-size:12px;color:var(--text)">${label}</div>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <span style="font-size:10px;color:var(--muted2)" id="lbl_${key}">${checked?'ON':'OFF'}</span>
+      <div onclick="toggleCfg('${key}',this)" style="width:36px;height:20px;border-radius:10px;background:${checked?'var(--green)':'var(--bg4)'};border:1px solid ${checked?'var(--green-border)':'var(--border2)'};position:relative;cursor:pointer;transition:all .2s" data-val="${checked}">
+        <div style="width:14px;height:14px;border-radius:7px;background:#fff;position:absolute;top:2px;${checked?'right:2px':'left:2px'};transition:all .2s"></div>
+      </div>
+    </label>
+  </div>`;
+}
+
+function cfgNumber(key, label, value, placeholder){
+  return`<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+      <div style="font-size:12px;color:var(--text)">${label}</div>
+    </div>
+    <div style="display:flex;gap:6px">
+      <input class="form-inp" id="cfg_${key}" type="number" value="${value||''}" placeholder="${placeholder}" step="any"
+        style="flex:1;font-size:12px;padding:7px 10px">
+      <button onclick="applyCfg('${key}')" style="padding:7px 14px;background:var(--blue-glow);color:var(--blue);border:1px solid rgba(59,126,255,.3);border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;cursor:pointer">Set</button>
+    </div>
+  </div>`;
+}
+
+async function toggleCfg(key, el){
+  const cur=el.getAttribute('data-val')==='true';
+  const newVal=!cur;
+  try{
+    await api('/api/settings/update','POST',{key,value:String(newVal)});
+    el.style.background=newVal?'var(--green)':'var(--bg4)';
+    el.style.borderColor=newVal?'var(--green-border)':'var(--border2)';
+    el.querySelector('div').style.cssText=`width:14px;height:14px;border-radius:7px;background:#fff;position:absolute;top:2px;${newVal?'right:2px':'left:2px'};transition:all .2s`;
+    el.setAttribute('data-val',String(newVal));
+    const lbl=document.getElementById('lbl_'+key);
+    if(lbl) lbl.textContent=newVal?'ON':'OFF';
+    toast(`${key}: ${newVal?'ON':'OFF'}`,'ok');
+  }catch(e){toast('Gagal update: '+e.message,'err')}
+}
+
+async function applyCfg(key){
+  const el=document.getElementById('cfg_'+key);
+  if(!el||!el.value){toast('Isi nilai dulu','err');return}
+  try{
+    await api('/api/settings/update','POST',{key,value:el.value});
+    toast(`${key} = ${el.value}`,'ok');
+  }catch(e){toast('Gagal: '+e.message,'err')}
+}
+
+async function applyScore(){
+  const val=document.getElementById('scoreSlider').value;
+  try{
+    await api('/api/settings/update','POST',{key:'MIN_CONFLUENCE_SCORE',value:val});
+    toast(`Min score = ${val}/24 — aktif sekarang`,'ok');
+  }catch(e){toast('Gagal: '+e.message,'err')}
+}
+
+
+// ── JOURNAL DETAIL ─────────────────────
+async function showJournal(tradeId){
+  if(!tradeId||tradeId==='undefined'||tradeId==='null'){
+    toast('Trade ID tidak tersedia','err'); return;
+  }
+  openModal('modalJournal');
+  const el=document.getElementById('journalContent');
+  el.innerHTML='<div class="loading-wrap"><div class="spinner"></div>Loading...</div>';
+  try{
+    const d=await api('/api/journal/'+tradeId);
+    const isProfit=d.result==='PROFIT';
+    const isL=(d.direction||'').toUpperCase()==='BUY'||(d.direction||'').toUpperCase()==='LONG';
+    const dec=(d.entry_price||0)>100?2:4;
+    el.innerHTML=`
+      <div style="text-align:center;padding:10px 0 16px">
+        <div style="font-size:18px;font-weight:800;color:${isProfit?'var(--green)':'var(--red)'}">${isProfit?'✅ PROFIT':'❌ LOSS'}</div>
+        <div style="font-size:24px;font-weight:800;color:${isProfit?'var(--green)':'var(--red)'};margin-top:4px">${fPnl(d.pnl)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${d.pair||'–'} · ${isL?'LONG':'SHORT'} · ${d.close_time_wib||'–'}</div>
+      </div>
+      <div class="breakdown-list" style="margin-bottom:12px">
+        <div class="breakdown-item"><div class="breakdown-name">Entry</div><div class="breakdown-pts on">${f(d.entry_price,dec)}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">Close</div><div class="breakdown-pts on">${f(d.close_price,dec)}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">SL</div><div class="breakdown-pts off">${f(d.sl_price,dec)}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">TP2</div><div class="breakdown-pts on">${f(d.tp2_price,dec)}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">RR Achieved</div><div class="breakdown-pts on">1:${f(d.rr_achieved,2)}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">Conf. Score</div><div class="breakdown-pts on">${d.confluence_score||0}/24</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">Close Reason</div><div class="breakdown-pts ${d.close_reason==='SL'?'none':'on'}">${d.close_reason||'–'}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">Duration</div><div class="breakdown-pts on">${(d.duration_minutes||0)>=60?f((d.duration_minutes||0)/60,1)+'h':Math.round(d.duration_minutes||0)+'m'}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">BP Mode</div><div class="breakdown-pts on">${d.bp_mode||'–'}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">VWAP Zone</div><div class="breakdown-pts on">${d.vwap_zone||'–'}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">Regime</div><div class="breakdown-pts on">${d.regime||'–'}</div></div>
+        <div class="breakdown-item"><div class="breakdown-name">BTC Trend</div><div class="breakdown-pts on">${d.btc_trend||'–'}</div></div>
+      </div>
+      <div style="font-size:10px;font-weight:700;color:var(--muted2);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Analisis</div>
+      ${(d.analysis||[]).map(a=>`<div style="font-size:12px;color:var(--text);padding:5px 0;border-bottom:1px solid var(--border)">${a}</div>`).join('')}
+    `;
+  }catch(e){
+    el.innerHTML='<div style="color:var(--muted);font-size:12px;text-align:center;padding:20px">Trade journal belum tersedia untuk trade ini.</div>';
+  }
+}
+
+
 async function pauseBot(){
   try{
     await api('/api/pause','POST',{hours:1});
@@ -1852,7 +2356,7 @@ function renderHistory(trades){
       const pnl=t.pnl||0;
       const isL=(t.direction||'').toUpperCase()==='BUY'||(t.direction||'').toUpperCase()==='LONG';
       const dur=t.duration_minutes?Math.floor(t.duration_minutes)+'m':'–';
-      return`<div class="hist-item">
+      const _tid=t.trade_id||t.id||'';return`<div class="hist-item" onclick="showJournal('${_tid}')" style="cursor:pointer">
         <div>
           <div class="hist-pair">${t.pair||'–'}</div>
           <div class="hist-dir ${isL?'l':'s'}">${isL?'▲ LONG':'▼ SHORT'}</div>
@@ -1861,7 +2365,7 @@ function renderHistory(trades){
         </div>
         <div style="text-align:right">
           <div class="hist-pnl ${pCls(pnl)}">${fPnl(pnl)}</div>
-          <div class="hist-rr">RR 1:${f(t.rr_achieved,1)}</div>
+          <div class="hist-rr">RR 1:${f(t.rr_achieved,1)}</div><div style="font-size:9px;color:var(--muted);margin-top:2px">↗ detail</div>
         </div>
       </div>`;
     }).join('')+
@@ -1890,7 +2394,7 @@ function filterHist(type){
     const pnl=t.pnl||0;
     const isL=(t.direction||'').toUpperCase()==='BUY'||(t.direction||'').toUpperCase()==='LONG';
     const dur=t.duration_minutes?Math.floor(t.duration_minutes)+'m':'–';
-    return`<div class="hist-item">
+    const _tid=t.trade_id||t.id||'';return`<div class="hist-item" onclick="showJournal('${_tid}')" style="cursor:pointer">
       <div>
         <div class="hist-pair">${t.pair||'–'}</div>
         <div class="hist-dir ${isL?'l':'s'}">${isL?'▲ LONG':'▼ SHORT'}</div>
@@ -1939,5 +2443,17 @@ if(sessionStorage.getItem('vx_auth')==='1'){
 // Focus input password otomatis
 document.getElementById('lockInput').focus();
 </script>
+
+<!-- MODAL: Journal Detail -->
+<div class="overlay" id="modalJournal">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Trade Journal</div>
+    <div id="journalContent">
+      <div class="loading-wrap"><div class="spinner"></div>Loading...</div>
+    </div>
+    <button class="btn-cancel" onclick="closeModal('modalJournal')">Tutup</button>
+  </div>
+</div>
 </body>
 </html>

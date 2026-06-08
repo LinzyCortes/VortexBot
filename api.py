@@ -312,12 +312,12 @@ def get_tickers():
 
                 result[pair] = {
                     "last"        : round(_safe_float(t.get("last", 0)), 6),
-                    "high"        : round(_safe_float(t.get("high", 0)), 6),
-                    "low"         : round(_safe_float(t.get("low", 0)), 6),
-                    "vol_usdt"    : round(_safe_float(t.get("quoteVolume", t.get("vol_usdt", 0))), 2),
-                    "change_pct"  : round(_safe_float(t.get("percentage", t.get("change_pct", 0))), 4),
-                    "bid"         : round(_safe_float(t.get("bid", 0)), 6),
-                    "ask"         : round(_safe_float(t.get("ask", 0)), 6),
+                    "high"        : round(_safe_float(t.get("high", t.get("highPrice24h", 0))), 6),
+                    "low"         : round(_safe_float(t.get("low",  t.get("lowPrice24h",  0))), 6),
+                    "vol_usdt"    : round(_safe_float(t.get("quoteVolume", t.get("volCcy24h", t.get("vol_usdt", t.get("turnover24h", 0))))), 2),
+                    "change_pct"  : round(_safe_float(t.get("percentage", t.get("change_pct", t.get("priceChangePercent", 0)))), 4),
+                    "bid"         : round(_safe_float(t.get("bid", t.get("bidPx", 0))), 6),
+                    "ask"         : round(_safe_float(t.get("ask", t.get("askPx", 0))), 6),
                     "funding_rate": round(funding, 8),
                 }
             except Exception as pe:
@@ -682,7 +682,7 @@ def resume_bot():
 def get_ohlcv(pair: str = "ETH-USDT-SWAP", tf: str = "15m", limit: int = 60):
     try:
         # Map timeframe frontend ke format OKX
-        tf_map = {"1m":"1m","5m":"5m","15m":"15m","1h":"1H","4h":"4H","1d":"1D"}
+        tf_map = {"1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m","1h":"1H","2h":"2H","4h":"4H","1d":"1D","1w":"1W"}
         okx_tf = tf_map.get(tf, "15m")
         candles = exchange.get_ohlcv(pair, okx_tf, limit=limit)
         if not candles:
@@ -742,6 +742,204 @@ def backup_status():
         return {"last_backup": None, "status": "never"}
     except Exception as e:
         return {"last_backup": None, "status": "error"}
+
+# ─── ANALYTICS ───────────────────────────────────────────────────────────────
+@app.get("/api/analytics")
+def get_analytics():
+    try:
+        trades = db.get_trade_history(limit=500) or []
+        if not trades:
+            return {"equity_curve":[],"drawdown":[],"per_pair":{},"hourly":{},"summary":{}}
+
+        def parse_time(t):
+            raw = t.get("close_time_wib") or t.get("close_time_utc") or ""
+            try:
+                from datetime import datetime as dt
+                return dt.fromisoformat(str(raw)[:19])
+            except Exception:
+                from datetime import datetime as dt
+                return dt.min
+
+        sorted_trades = sorted(trades, key=parse_time)
+
+        # Equity curve & drawdown
+        equity_curve=[]; dd_series=[]
+        balance=0.0; peak=0.0; max_dd=0.0
+        for t in sorted_trades:
+            pnl = _safe_float(t.get("pnl",0))
+            balance += pnl
+            if balance > peak: peak = balance
+            dd = (peak-balance)/max(peak,1)*100 if peak>0 else 0
+            max_dd = max(max_dd, dd)
+            ts = str(t.get("close_time_wib",""))[:10]
+            equity_curve.append({"t":ts,"v":round(balance,4),"pnl":round(pnl,4)})
+            dd_series.append({"t":ts,"v":round(-dd,4)})
+
+        # Per-pair stats
+        per_pair={}
+        for t in sorted_trades:
+            pair=t.get("pair","UNKNOWN"); pnl=_safe_float(t.get("pnl",0))
+            if pair not in per_pair:
+                per_pair[pair]={"wins":0,"losses":0,"total_pnl":0,"trades":0,"best_rr":0}
+            per_pair[pair]["trades"]+=1
+            per_pair[pair]["total_pnl"]+=pnl
+            per_pair[pair]["best_rr"]=max(per_pair[pair]["best_rr"],_safe_float(t.get("rr_achieved",0)))
+            if pnl>0: per_pair[pair]["wins"]+=1
+            else: per_pair[pair]["losses"]+=1
+        for p in per_pair:
+            n=per_pair[p]["trades"]
+            per_pair[p]["win_rate"]=round(per_pair[p]["wins"]/n*100,1) if n>0 else 0
+            per_pair[p]["total_pnl"]=round(per_pair[p]["total_pnl"],4)
+            per_pair[p]["avg_pnl"]=round(per_pair[p]["total_pnl"]/n,4) if n>0 else 0
+
+        # Hourly performance
+        hourly={}
+        for t in sorted_trades:
+            raw=str(t.get("close_time_wib",""))
+            try: hour=int(raw[11:13])
+            except: continue
+            pnl=_safe_float(t.get("pnl",0))
+            if hour not in hourly: hourly[hour]={"wins":0,"losses":0,"total_pnl":0,"trades":0}
+            hourly[hour]["trades"]+=1; hourly[hour]["total_pnl"]+=pnl
+            if pnl>0: hourly[hour]["wins"]+=1
+            else: hourly[hour]["losses"]+=1
+
+        # Summary stats
+        wins=sum(1 for t in sorted_trades if _safe_float(t.get("pnl",0))>0)
+        losses=len(sorted_trades)-wins
+        total_pnl=sum(_safe_float(t.get("pnl",0)) for t in sorted_trades)
+        gross_profit=sum(_safe_float(t.get("pnl",0)) for t in sorted_trades if _safe_float(t.get("pnl",0))>0)
+        gross_loss=abs(sum(_safe_float(t.get("pnl",0)) for t in sorted_trades if _safe_float(t.get("pnl",0))<0))
+        profit_factor=round(gross_profit/gross_loss,2) if gross_loss>0 else 0
+        durations=[_safe_float(t.get("duration_minutes",0)) for t in sorted_trades if t.get("duration_minutes")]
+        avg_dur=round(sum(durations)/len(durations),1) if durations else 0
+        max_cw=max_cl=cw=cl=0
+        for t in sorted_trades:
+            if _safe_float(t.get("pnl",0))>0: cw+=1;cl=0;max_cw=max(max_cw,cw)
+            else: cl+=1;cw=0;max_cl=max(max_cl,cl)
+
+        return {
+            "equity_curve":equity_curve[-100:], "drawdown":dd_series[-100:],
+            "per_pair":per_pair, "hourly":hourly,
+            "max_drawdown_pct":round(max_dd,2), "total_pnl":round(total_pnl,4),
+            "profit_factor":profit_factor, "avg_duration_min":avg_dur,
+            "max_consec_wins":max_cw, "max_consec_losses":max_cl,
+            "total_trades":len(sorted_trades), "wins":wins, "losses":losses,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── RISK CALCULATOR ─────────────────────────────────────────────────────────
+@app.get("/api/risk_calc")
+def risk_calc(pair: str="ETH-USDT-SWAP", entry: float=0, sl: float=0, direction: str="BUY"):
+    try:
+        balance=_safe_float(exchange.get_balance().get("free",0))
+        risk_pct=_safe_float(getattr(cfg,"RISK_PERCENT",1.0))
+        risk_amount=balance*risk_pct/100
+        if not entry:
+            entry=_safe_float(exchange.get_ticker(pair).get("last",0))
+        if not entry or not sl:
+            return {"error":"Entry dan SL harus diisi"}
+        sl_dist=abs(entry-sl); sl_pct=sl_dist/entry*100; is_long=direction.upper()=="BUY"
+        tp1=entry+sl_dist if is_long else entry-sl_dist
+        tp2=entry+sl_dist*2 if is_long else entry-sl_dist*2
+        tp3=entry+sl_dist*3 if is_long else entry-sl_dist*3
+        scenarios=[]
+        for lev in [1,2,3,5,10]:
+            qty=round(risk_amount*lev/sl_dist,6) if sl_dist>0 else 0
+            scenarios.append({"leverage":lev,"quantity":qty,
+                "position_usdt":round(qty*entry/lev,2),"risk_usdt":round(risk_amount,4)})
+        return {"pair":pair,"entry":entry,"sl":sl,"sl_dist":round(sl_dist,6),
+            "sl_pct":round(sl_pct,3),"direction":direction,"balance":round(balance,4),
+            "risk_amount":round(risk_amount,4),"tp1":round(tp1,4),"tp2":round(tp2,4),
+            "tp3":round(tp3,4),"scenarios":scenarios}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── SETTINGS CONTROL ────────────────────────────────────────────────────────
+class UpdateConfigRequest(BaseModel):
+    key: str
+    value: str
+
+ALLOWED_SETTINGS = {
+    "MIN_CONFLUENCE_SCORE","MIN_RR","RISK_PERCENT",
+    "VWAP_ENABLED","FUNDING_RATE_ENABLED","ATR_SL_MULT",
+    "VWAP_TOLERANCE_PCT","FUNDING_RATE_MAX_LONG","FUNDING_RATE_MAX_SHORT",
+}
+
+@app.get("/api/settings/config")
+def get_config():
+    try:
+        return {
+            "MIN_CONFLUENCE_SCORE"  : getattr(cfg,"MIN_CONFLUENCE_SCORE",15),
+            "MIN_RR"                : getattr(cfg,"MIN_RR",3.0),
+            "RISK_PERCENT"          : getattr(cfg,"RISK_PERCENT",1.0),
+            "VWAP_ENABLED"          : getattr(cfg,"VWAP_ENABLED",True),
+            "FUNDING_RATE_ENABLED"  : getattr(cfg,"FUNDING_RATE_ENABLED",True),
+            "ATR_SL_MULT"           : getattr(cfg,"ATR_SL_MULT",2.0),
+            "VWAP_TOLERANCE_PCT"    : getattr(cfg,"VWAP_TOLERANCE_PCT",0.3),
+            "FUNDING_RATE_MAX_LONG" : getattr(cfg,"FUNDING_RATE_MAX_LONG",0.05),
+            "FUNDING_RATE_MAX_SHORT": getattr(cfg,"FUNDING_RATE_MAX_SHORT",-0.05),
+            "PAIRS"                 : list(getattr(cfg,"PAIRS",[])),
+            "TF_BIAS"               : getattr(cfg,"TF_BIAS","4H"),
+            "TF_SETUP"              : getattr(cfg,"TF_SETUP","1H"),
+            "TF_ENTRY"              : getattr(cfg,"TF_ENTRY","15m"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/settings/update")
+def update_setting(req: UpdateConfigRequest):
+    try:
+        if req.key not in ALLOWED_SETTINGS:
+            raise HTTPException(400, f"Key '{req.key}' tidak diizinkan")
+        # Update live config (berlaku sampai restart)
+        if hasattr(cfg, req.key):
+            orig = getattr(cfg, req.key)
+            try:
+                if isinstance(orig, bool): setattr(cfg, req.key, req.value.lower() in ("true","1","yes"))
+                elif isinstance(orig, int): setattr(cfg, req.key, int(float(req.value)))
+                elif isinstance(orig, float): setattr(cfg, req.key, float(req.value))
+                else: setattr(cfg, req.key, req.value)
+            except Exception as ce:
+                raise HTTPException(500, f"Gagal set value: {ce}")
+        return {"success":True,"key":req.key,"value":req.value,
+                "note":"Aktif sampai restart. Update Railway Variables untuk permanen."}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── JOURNAL DETAIL ──────────────────────────────────────────────────────────
+@app.get("/api/journal/{trade_id}")
+def get_journal(trade_id: str):
+    try:
+        trades = db.get_trade_history(limit=500) or []
+        trade  = next((t for t in trades if str(t.get("id",t.get("trade_id",""))) == str(trade_id)), None)
+        if not trade:
+            raise HTTPException(404, "Trade tidak ditemukan")
+        pnl=_safe_float(trade.get("pnl",0)); rr=_safe_float(trade.get("rr_achieved",0))
+        score=trade.get("confluence_score",0); dur=_safe_float(trade.get("duration_minutes",0))
+        reason=trade.get("close_reason","")
+        analysis=[]
+        if pnl>0:
+            analysis.append("✅ Trade profit — setup valid")
+            if rr>=2: analysis.append(f"🎯 RR bagus: 1:{rr:.1f}")
+            if score>=18: analysis.append(f"💪 Score tinggi ({score}/24) — high conviction")
+        else:
+            analysis.append("❌ Trade loss — evaluasi setup")
+            if reason=="SL": analysis.append("⚠️ SL terkena — market tidak konfirmasi arah")
+            if score<15: analysis.append(f"📉 Score rendah ({score}/24) — entry terlalu agresif")
+        if dur<30: analysis.append("⏱️ Posisi sangat singkat — timing kurang tepat")
+        elif dur>480: analysis.append(f"⏳ Holding {int(dur//60)}j {int(dur%60)}m — sabar")
+        return {**{k:trade.get(k) for k in ["pair","direction","entry_price","close_price",
+            "sl_price","tp1_price","tp2_price","bp_mode","vwap_zone","regime","btc_trend"]},
+            "trade_id":trade_id, "pnl":round(pnl,4), "rr_achieved":round(rr,2),
+            "confluence_score":score, "close_reason":reason, "duration_minutes":dur,
+            "close_time_wib":str(trade.get("close_time_wib",""))[:16],
+            "analysis":analysis, "result":"PROFIT" if pnl>0 else "LOSS"}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ═════════════════════════════════════════════
 # SERVER RUNNER

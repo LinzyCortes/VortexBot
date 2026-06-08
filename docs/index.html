@@ -574,7 +574,14 @@ html,body{
       </div>
       <div class="price-main" id="priceMain">–</div>
       <div class="price-change" id="priceChange">–</div>
-      <div class="chart-wrap"><canvas id="miniChart"></canvas></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+        <div style="display:flex;gap:4px">
+          <button onclick="setChartType('line',this)" id="ctLine" style="font-size:10px;padding:3px 8px;border-radius:4px;font-family:var(--font);cursor:pointer;background:var(--blue-glow);color:var(--blue);border:1px solid rgba(59,126,255,.4)">Line</button>
+          <button onclick="setChartType('candle',this)" id="ctCandle" style="font-size:10px;padding:3px 8px;border-radius:4px;font-family:var(--font);cursor:pointer;background:var(--bg4);color:var(--muted2);border:1px solid var(--border)">Candle</button>
+        </div>
+        <div style="font-size:10px;color:var(--muted)" id="chartTimeLabel">15m</div>
+      </div>
+      <div class="chart-wrap" style="height:100px"><canvas id="miniChart"></canvas></div>
       <div class="tf-sel">
         <button class="tf-btn" onclick="changeTF('5m',this)">5M</button>
         <button class="tf-btn sel" onclick="changeTF('15m',this)" id="tfDef">15M</button>
@@ -1164,12 +1171,15 @@ function selectTF(tf, el){
   curTF = tf;
   document.querySelectorAll('#tfSel .pair-btn').forEach(b=>b.classList.remove('sel'));
   el.classList.add('sel');
-  // Reload chart with new TF
-  loadOHLCV(curPair, tf).then(prices=>{
-    if(prices && prices.length>1){
-      const cur = parseFloat(document.getElementById('priceMain').textContent)||0;
-      const chg = parseFloat((document.getElementById('priceChange').textContent||'0').replace('%',''));
-      drawChart(prices, chg>=0);
+  const lbl = document.getElementById('chartTimeLabel');
+  if(lbl) lbl.textContent = tf.toUpperCase();
+  loadOHLCV(curPair, tf).then(candles=>{
+    if(!candles||candles.length<2) return;
+    if(chartType==='candle') drawCandleChart(candles);
+    else{
+      const closes = candles.map(c=>c.c||c);
+      const up = closes[closes.length-1] >= closes[0];
+      drawChart(closes, up);
     }
   });
 }
@@ -1288,6 +1298,8 @@ function drawChart(prices,up){
 }
 
 let curTF = '15m';
+let chartType = 'line';
+let ohlcvCache = {};
 const TF_LIMITS = {'5m':80,'15m':60,'30m':48,'1h':48,'4h':60,'1d':60};
 
 async function loadOHLCV(pair, tf){
@@ -1297,9 +1309,122 @@ async function loadOHLCV(pair, tf){
     const d = await api('/api/ohlcv?pair='+pair+'&tf='+tf+'&limit='+limit);
     const candles = d.candles||[];
     if(candles.length < 2) return null;
-    return candles.map(c=>c.c);
+    // Cache full OHLC
+    ohlcvCache[pair+'_'+tf] = candles;
+    // Update chart label
+    const lbl = document.getElementById('chartTimeLabel');
+    if(lbl) lbl.textContent = tf.toUpperCase();
+    return candles;
   }catch(e){return null}
 }
+
+// ── CHART TYPE TOGGLE ──────────────────
+function setChartType(type, el){
+  chartType = type;
+  ['ctLine','ctCandle'].forEach(id=>{
+    const b = document.getElementById(id);
+    if(!b) return;
+    const active = (type==='line'&&id==='ctLine')||(type==='candle'&&id==='ctCandle');
+    b.style.background = active?'var(--blue-glow)':'var(--bg4)';
+    b.style.color = active?'var(--blue)':'var(--muted2)';
+    b.style.borderColor = active?'rgba(59,126,255,.4)':'var(--border)';
+  });
+  const cached = ohlcvCache[curPair+'_'+curTF];
+  if(cached && cached.length){
+    if(type==='candle') drawCandleChart(cached);
+    else{
+      const closes = cached.map(c=>c.c);
+      const up = closes[closes.length-1] >= closes[0];
+      drawChart(closes, up);
+    }
+  } else {
+    loadOHLCV(curPair, curTF).then(candles=>{
+      if(!candles) return;
+      if(type==='candle') drawCandleChart(candles);
+      else drawChart(candles.map(c=>c.c), candles[candles.length-1]?.c >= candles[0]?.c);
+    });
+  }
+}
+
+// ── CANDLESTICK CHART (Canvas) ─────────
+function drawCandleChart(candles){
+  const canvas = document.getElementById('miniChart');
+  if(!canvas || !candles.length) return;
+  if(miniChartInst){miniChartInst.destroy();miniChartInst=null;}
+
+  const dpr = window.devicePixelRatio||1;
+  const W = canvas.offsetWidth||380;
+  const H = canvas.offsetHeight||100;
+  canvas.width  = W*dpr;
+  canvas.height = H*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,W,H);
+
+  const pad={t:6,b:6,l:2,r:2};
+  const cw = (W-pad.l-pad.r)/candles.length;
+  const bodyW = Math.max(1, cw*0.65);
+
+  const minP = Math.min(...candles.map(c=>c.l));
+  const maxP = Math.max(...candles.map(c=>c.h));
+  const range = maxP-minP||1;
+  const yOf = p => pad.t+(1-(p-minP)/range)*(H-pad.t-pad.b);
+
+  // Grid
+  ctx.strokeStyle='rgba(255,255,255,0.04)';ctx.lineWidth=1;
+  for(let i=1;i<4;i++){
+    const y=pad.t+(H-pad.t-pad.b)*i/4;
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+  }
+
+  // Volume bars (bottom 20%)
+  const volH = (H-pad.t-pad.b)*0.18;
+  const maxVol = Math.max(...candles.map(c=>c.v||0))||1;
+  candles.forEach((c,i)=>{
+    if(!c.v) return;
+    const x = pad.l+i*cw;
+    const isUp = c.c>=c.o;
+    const vh = (c.v/maxVol)*volH;
+    ctx.fillStyle = isUp?'rgba(0,208,138,0.2)':'rgba(255,77,106,0.2)';
+    ctx.fillRect(x+cw*0.1, H-pad.b-vh, cw*0.8, vh);
+  });
+
+  // Candles
+  candles.forEach((c,i)=>{
+    const x = pad.l+i*cw+cw/2;
+    const isUp = c.c>=c.o;
+    const color = isUp?'#00d08a':'#ff4d6a';
+    const bodyTop = yOf(Math.max(c.o,c.c));
+    const bodyBot = yOf(Math.min(c.o,c.c));
+    const bodyH = Math.max(1,bodyBot-bodyTop);
+
+    // Wick
+    ctx.strokeStyle=color;ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(x,yOf(c.h));ctx.lineTo(x,yOf(c.l));ctx.stroke();
+
+    // Body
+    ctx.fillStyle=isUp?'rgba(0,208,138,0.85)':'rgba(255,77,106,0.85)';
+    ctx.fillRect(x-bodyW/2,bodyTop,bodyW,bodyH);
+    ctx.strokeStyle=color;ctx.lineWidth=0.5;
+    ctx.strokeRect(x-bodyW/2,bodyTop,bodyW,bodyH);
+  });
+
+  // Last price dashed line
+  const last = candles[candles.length-1]?.c;
+  if(last){
+    const y=yOf(last);
+    ctx.strokeStyle='rgba(139,92,246,0.5)';ctx.lineWidth=1;
+    ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+    ctx.setLineDash([]);
+    // Price label
+    ctx.fillStyle='rgba(139,92,246,0.8)';
+    ctx.font=`${9*dpr/dpr}px monospace`;
+    ctx.fillText(last.toFixed(last>100?2:4), W-pad.r-42, y-2);
+  }
+}
+
+
 
 function changeTF(tf, el){
   curTF = tf;
@@ -1351,9 +1476,14 @@ async function loadMarket(){
       frEl.style.color=fr>0.001?'var(--red)':fr<-0.001?'var(--green)':'var(--muted2)';
 
       // Load real OHLCV untuk chart
-      loadOHLCV(curPair, curTF).then(prices=>{
-        if(prices && prices.length>1){
-          drawChart(prices,up);
+      loadOHLCV(curPair, curTF).then(candles=>{
+        if(candles && candles.length>1){
+          if(chartType==='candle'){
+            drawCandleChart(candles);
+          } else {
+            const closes = candles.map(c=>c.c||c);
+            drawChart(closes, up);
+          }
         } else {
           // Fallback: smooth sinusoidal dari range harga
           const range=high-low;
@@ -1937,13 +2067,28 @@ async function calcRisk(){
 
     const scEl=document.getElementById('rcScenarios');
     if(scEl){
-      scEl.innerHTML=(d.scenarios||[]).map(s=>`
-        <div style="display:grid;grid-template-columns:50px 1fr 1fr 1fr;gap:6px;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
-          <div style="font-size:11px;color:var(--blue);font-weight:700">${s.leverage}x</div>
-          <div style="font-size:10px;color:var(--muted2)">Qty<br><span style="color:var(--text);font-weight:700">${f(s.quantity,4)}</span></div>
-          <div style="font-size:10px;color:var(--muted2)">Pos USDT<br><span style="color:var(--text);font-weight:700">${fUSD(s.position_usdt)}</span></div>
-          <div style="font-size:10px;color:var(--muted2)">Risk<br><span style="color:var(--yellow);font-weight:700">${fUSD(s.risk_usdt)}</span></div>
-        </div>`).join('');
+      scEl.innerHTML=`
+        <div style="display:grid;grid-template-columns:45px 1fr 1fr 1fr 1fr;gap:4px;padding:4px 0;margin-bottom:4px">
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase">Lev</div>
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase">Qty</div>
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase">Modal</div>
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase">Pos Total</div>
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase">Risk</div>
+        </div>`+
+      (d.scenarios||[]).map(s=>{
+        // Modal = uang yang benar-benar kamu keluarkan (margin)
+        // Pos Total = nilai posisi sebenarnya (qty * entry)
+        const posTot = s.quantity * d.entry;
+        const modal  = posTot / s.leverage;
+        return`<div style="display:grid;grid-template-columns:45px 1fr 1fr 1fr 1fr;gap:4px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
+          <div style="font-size:12px;color:var(--blue);font-weight:800">${s.leverage}x</div>
+          <div style="font-size:11px;font-weight:700;color:var(--text)">${f(s.quantity,4)}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--cyan)">${fUSD(modal)}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted2)">${fUSD(posTot)}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--yellow)">${fUSD(s.risk_usdt)}</div>
+        </div>`;
+      }).join('')+
+      `<div style="font-size:9px;color:var(--muted);margin-top:6px">Modal = uang yang kamu keluarkan · Pos Total = nilai kontrak · Risk = max loss jika SL kena</div>`;
     }
   }catch(e){
     if(loadEl){loadEl.style.display='block';loadEl.textContent='Gagal load kalkulasi';}

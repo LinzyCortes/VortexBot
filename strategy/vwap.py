@@ -2,18 +2,25 @@
 # VORTEX BOT - VWAP ANALYSIS
 # ============================================
 #
-# FIX v1.3:
+# FIX v1.4 (baru):
+#   - calculate_vwap_bands sekarang pakai ROLLING window
+#     (default 20 candle) untuk hitung std dev, BUKAN
+#     cumulative dari awal hari (00:00 UTC).
+#
+#     KENAPA INI BUG: cumulative variance = rata-rata
+#     deviasi SEPANJANG HARI. Begitu market trending
+#     searah beberapa jam, deviasi SAAT INI jauh lebih
+#     besar dari rata-rata historis hari itu -> flag
+#     "overextended" jadi True HAMPIR TERUS-MENERUS di
+#     jam-jam belakangan sesi (NY session khususnya),
+#     padahal itu trend valid bukan blow-off/exhaustion.
+#     Inilah penyebab hard block VWAP nyala nyaris tiap
+#     signal.
+#
+# FIX v1.3 (sebelumnya, tetap dipertahankan):
 #   - Session-aware tolerance
-#     NY session (13:30-16:00 UTC) pakai tolerance
-#     lebih lebar (1.0%) karena harga sudah bergerak
-#     jauh dari VWAP harian setelah London session.
-#     Sebelumnya tolerance flat 0.3% → bot tidak pernah
-#     entry di NY karena price terlihat "overextended"
-#     padahal itu trend valid.
-#   - Tambah per-session VWAP (London & NY terpisah)
-#     sebagai referensi tambahan selain daily VWAP.
-#   - Hard block hanya untuk overextended BERLAWANAN
-#     arah, bukan sekedar "di atas/bawah VWAP".
+#   - Per-session VWAP (London & NY terpisah)
+#   - Hard block hanya untuk overextended BERLAWANAN arah
 
 import pandas as pd
 import numpy as np
@@ -58,10 +65,6 @@ class VWAPAnalysis:
         """
         Tolerance VWAP per session.
 
-        FIX: NY session pakai tolerance lebih lebar
-        karena harga sudah bergerak ~1-2% dari VWAP
-        setelah London session duluan jalan.
-
         London     : 0.5% — market baru buka, VWAP masih fresh
         NY         : 1.0% — VWAP sudah terbentuk 13+ jam
         Off-session: 0.3% — pakai cfg default (ketat)
@@ -96,15 +99,37 @@ class VWAPAnalysis:
     @staticmethod
     def calculate_vwap_bands(df: pd.DataFrame,
                              vwap: pd.Series,
-                             num_std: float = 1.0) -> dict:
-        """VWAP bands ±1 std dev untuk deteksi overextended."""
+                             num_std: float = 1.0,
+                             window: int = 20) -> dict:
+        """
+        VWAP bands ±1 std dev untuk deteksi overextended.
+
+        FIX v1.4: pakai ROLLING window (default 20 candle)
+        untuk hitung variance, bukan cumsum dari awal hari.
+        Ini bikin band merefleksikan volatilitas TERKINI,
+        bukan rata-rata sepanjang hari yang bias saat
+        market lagi trending.
+        """
         try:
             typical_price = (
                 df["high"] + df["low"] + df["close"]
             ) / 3
-            variance = (
+            deviation_sq = (
                 (typical_price - vwap) ** 2 * df["volume"]
-            ).cumsum() / df["volume"].cumsum()
+            )
+
+            win = min(window, len(df)) if len(df) > 0 else 1
+            win = max(win, 1)
+
+            rolling_num = deviation_sq.rolling(
+                window=win, min_periods=1
+            ).sum()
+            rolling_vol = df["volume"].rolling(
+                window=win, min_periods=1
+            ).sum()
+
+            variance = rolling_num / rolling_vol.replace(0, np.nan)
+            variance = variance.fillna(0)
 
             std_dev    = np.sqrt(variance)
             upper_band = vwap + (std_dev * num_std)
@@ -126,8 +151,8 @@ class VWAPAnalysis:
         Hitung VWAP harian dari data 1H.
         Reset tiap 00:00 UTC — standar institusi.
 
-        FIX: Tolerance sekarang dinamis per session,
-        bukan flat 0.3% untuk semua waktu.
+        Tolerance dinamis per session (v1.3), band
+        overextended pakai rolling window (v1.4).
         """
         try:
             if df_1h.empty or len(df_1h) < 2:
@@ -174,7 +199,6 @@ class VWAPAnalysis:
                 current_price < lower
             ) if (upper > 0 and lower > 0) else False
 
-            # FIX: tolerance dinamis per session
             session   = self._get_current_session()
             tolerance = self._get_tolerance_for_session(session)
             near_vwap = abs(diff_pct) <= tolerance
@@ -214,11 +238,6 @@ class VWAPAnalysis:
                          session: str) -> dict:
         """
         Hitung VWAP per-session (London atau NY).
-        Reset di awal setiap session — lebih akurat
-        untuk entry di pertengahan/akhir session.
-
-        London start : 08:00 UTC
-        NY start     : 13:30 UTC
         """
         try:
             if df_1h.empty:
@@ -277,13 +296,10 @@ class VWAPAnalysis:
         """
         Filter entry berdasarkan posisi harga vs VWAP.
 
-        FIX v1.3: Hard block HANYA untuk kondisi:
+        Hard block HANYA untuk kondisi:
           - BUY  + overextended di atas VWAP
           - SELL + overextended di bawah VWAP
           - DAN sudah jauh > 2x tolerance dari VWAP
-
-        Sebelumnya hard block terlalu mudah trigger
-        karena tolerance flat → NY session selalu blocked.
 
         Score bonus:
           +2 → zona ideal + tidak overextended
@@ -321,20 +337,16 @@ class VWAPAnalysis:
                 "session"   : session,
             }
 
-            # Hard block threshold = 2x tolerance
-            # (lebih ketat dari sekedar overextended)
             hard_block_threshold = tolerance * 2
 
             if direction == "BUY":
                 if side == "below" and not overextended:
-                    # Ideal: discount zone, tidak overextended
                     return {**base, "pass": True, "score_bonus": 2,
                             "reason": (
                                 f"✅ VWAP: DISCOUNT zone "
                                 f"({diff_pct:+.2f}%) — ideal BUY"
                             )}
                 elif near_vwap:
-                    # Near VWAP dalam tolerance session
                     return {**base, "pass": True, "score_bonus": 1,
                             "reason": (
                                 f"⚠️ VWAP: near VWAP "
@@ -344,7 +356,6 @@ class VWAPAnalysis:
                 elif (side == "above" and
                       abs(diff_pct) > hard_block_threshold and
                       overextended):
-                    # Hard block: BUY sudah sangat jauh di atas VWAP
                     return {**base, "pass": False, "score_bonus": 0,
                             "reason": (
                                 f"❌ VWAP: BUY overextended "
@@ -352,7 +363,6 @@ class VWAPAnalysis:
                                 f"{hard_block_threshold:.1f}%) — skip"
                             )}
                 else:
-                    # Di atas VWAP tapi tidak ekstrem → warning, tetap pass
                     return {**base, "pass": True, "score_bonus": 0,
                             "reason": (
                                 f"⚠️ VWAP: BUY di PREMIUM "
@@ -455,19 +465,8 @@ class VWAPAnalysis:
     def analyze(self, df_1h: pd.DataFrame,
                 direction: str) -> dict:
         """
-        Full VWAP analysis dengan session-aware tolerance.
-
-        Return dict:
-          valid        → VWAP berhasil dihitung
-          pass         → signal boleh lanjut
-          score_bonus  → 0 / 1 / 2
-          vwap         → nilai VWAP harian
-          side         → above / below
-          zone         → PREMIUM / DISCOUNT
-          diff_pct     → jarak dari VWAP dalam %
-          session      → london / new_york / off_session
-          tolerance_pct → tolerance yang dipakai
-          reason       → teks untuk log/notif
+        Full VWAP analysis dengan session-aware tolerance
+        dan rolling-window overextended detection.
         """
         try:
             if not cfg.VWAP_ENABLED:
@@ -483,12 +482,10 @@ class VWAPAnalysis:
                     "tolerance_pct": cfg.VWAP_TOLERANCE_PCT,
                 }
 
-            # Daily VWAP
             vwap_data  = self.get_daily_vwap(df_1h)
             filter_res = self.check_vwap_filter(direction, vwap_data)
             reversion  = self.detect_vwap_reversion(df_1h, vwap_data)
 
-            # Session VWAP (sebagai info tambahan, tidak block)
             session     = vwap_data.get("session", "off_session")
             session_vwap = {}
             if session in ("london", "new_york"):

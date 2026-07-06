@@ -15,7 +15,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # non-interactive, aman di Railway
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import time
 import requests
@@ -23,31 +23,34 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 # ─────────────────────────────────────────────────────────────
-# PAIRS — tambah/hapus di sini saja, tidak perlu ubah yang lain
+# PAIRS
 # ─────────────────────────────────────────────────────────────
 PAIRS = [
-    'BTC/USDT:USDT',
-    'ETH/USDT:USDT',
+    'ETH/USDT',
+    'BNB/USDT',
+    'AAVE/USDT',
+    'LINK/USDT',
+    'AVAX/USDT',
+    'OP/USDT',
 ]
 
 # ─────────────────────────────────────────────────────────────
-# CONFIG EXCHANGE — tidak butuh API key untuk backtest
+# CONFIG EXCHANGE
 # ─────────────────────────────────────────────────────────────
-exchange = ccxt.okx({
+exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'swap',  # perpetual futures
+        'defaultType': 'future',
     }
 })
 
 # ─────────────────────────────────────────────────────────────
-# CONFIG TELEGRAM — ambil otomatis dari environment Railway
+# CONFIG TELEGRAM
 # ─────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN', '')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
 def _tg_send(message: str) -> bool:
-    """Kirim pesan teks ke Telegram."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("  [Telegram] Token/Chat ID tidak ditemukan, skip notif.")
         return False
@@ -67,7 +70,6 @@ def _tg_send(message: str) -> bool:
         return False
 
 def _tg_send_photo(image_path: str, caption: str = "") -> bool:
-    """Kirim foto/chart ke Telegram."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
     if not os.path.exists(image_path):
@@ -78,9 +80,9 @@ def _tg_send_photo(image_path: str, caption: str = "") -> bool:
             resp = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
                 data={
-                    "chat_id"    : TELEGRAM_CHAT_ID,
-                    "caption"    : caption[:1024],
-                    "parse_mode" : "HTML",
+                    "chat_id"   : TELEGRAM_CHAT_ID,
+                    "caption"   : caption[:1024],
+                    "parse_mode": "HTML",
                 },
                 files={"photo": photo},
                 timeout=30,
@@ -94,11 +96,11 @@ def _tg_send_photo(image_path: str, caption: str = "") -> bool:
 # CONFIG STRATEGI
 # ─────────────────────────────────────────────────────────────
 INITIAL_CAPITAL = 100
-RISK_PER_TRADE  = 0.01       # 1% per trade
+RISK_PER_TRADE  = 0.01
 ATR_SL_MULT     = 2.0
 TP_RATIOS       = [0.30, 0.40, 0.30]
 TP_RR           = [1.5,  2.5,  4.0]
-COOLDOWN_BARS   = 8          # ~2 jam di 15M
+COOLDOWN_BARS   = 8
 EMA_FAST        = 13
 EMA_SLOW        = 21
 STOCH_K         = 5
@@ -119,11 +121,11 @@ class Trade:
     tp_prices:      list
     size:           float
     entry_bar:      int
-    partial_closed: list  = field(default_factory=lambda: [False, False, False])
+    partial_closed: list         = field(default_factory=lambda: [False, False, False])
     trailing_sl:    Optional[float] = None
-    is_open:        bool  = True
-    pnl:            float = 0.0
-    exit_reason:    str   = ""
+    is_open:        bool         = True
+    pnl:            float        = 0.0
+    exit_reason:    str          = ""
 
 @dataclass
 class BacktestResult:
@@ -137,19 +139,49 @@ class BacktestResult:
     total_return:  float = 0.0
 
 # ─────────────────────────────────────────────────────────────
-# FETCH DATA
+# FETCH DATA — multi-batch agar dapat data panjang
 # ─────────────────────────────────────────────────────────────
+def _tf_to_ms(timeframe: str) -> int:
+    """Konversi timeframe string ke milliseconds."""
+    units = {'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+    return int(timeframe[:-1]) * units[timeframe[-1]] * 1000
+
 def fetch_ohlcv(symbol: str, timeframe: str,
                 limit: int = 1000) -> pd.DataFrame:
+    """Fetch data historis OHLCV — auto multi-batch untuk data panjang."""
     print(f"  Fetching {symbol} {timeframe} ({limit} bars)...")
     try:
-        bars = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        all_bars = []
+        per_req  = 1000  # Binance max per request
+        # Hitung since awal: mundur dari sekarang
+        now_ms   = int(time.time() * 1000)
+        tf_ms    = _tf_to_ms(timeframe)
+        since    = now_ms - (limit * tf_ms)
+
+        while len(all_bars) < limit:
+            fetch_n = min(per_req, limit - len(all_bars))
+            bars    = exchange.fetch_ohlcv(
+                symbol, timeframe,
+                since=since, limit=fetch_n
+            )
+            if not bars:
+                break
+            all_bars.extend(bars)
+            since = bars[-1][0] + tf_ms  # lanjut dari candle terakhir
+            time.sleep(0.4)
+            if len(bars) < fetch_n:
+                break  # sudah sampai candle terbaru
+
+        if not all_bars:
+            return pd.DataFrame()
+
         df = pd.DataFrame(
-            bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume']
+            all_bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume']
         )
         df['timestamp'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
-        df = df.drop(columns='ts').reset_index(drop=True)
-        time.sleep(0.3)
+        df = df.drop(columns='ts').drop_duplicates('timestamp')
+        df = df.sort_values('timestamp').reset_index(drop=True)
+        print(f"  → {len(df)} bars berhasil di-fetch")
         return df
     except Exception as e:
         print(f"  ERROR fetch {symbol} {timeframe}: {e}")
@@ -184,10 +216,10 @@ def calc_vwap(df: pd.DataFrame) -> pd.Series:
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df['atr']          = calc_atr(df)
-    df['ema13']        = calc_ema(df['close'], EMA_FAST)
-    df['ema21']        = calc_ema(df['close'], EMA_SLOW)
-    df['vwap']         = calc_vwap(df)
+    df['atr']            = calc_atr(df)
+    df['ema13']          = calc_ema(df['close'], EMA_FAST)
+    df['ema21']          = calc_ema(df['close'], EMA_SLOW)
+    df['vwap']           = calc_vwap(df)
     df['stk'], df['std'] = calc_stochastic(df, STOCH_K, STOCH_D, STOCH_SMOOTH)
     return df
 
@@ -205,27 +237,6 @@ def detect_swing_highs_lows(df: pd.DataFrame, lookback: int = 5):
         if df['low'].iloc[i] == wl.min():
             sl.iloc[i] = True
     return sh, sl
-
-def detect_bos_choch(df, sh, sl):
-    n = len(df)
-    bull_bos = pd.Series(False, index=df.index)
-    bear_bos = pd.Series(False, index=df.index)
-    choch_b  = pd.Series(False, index=df.index)
-    choch_s  = pd.Series(False, index=df.index)
-    last_sh, last_sl, trend = None, None, None
-
-    for i in range(1, n):
-        if sh.iloc[i-1]: last_sh = df['high'].iloc[i-1]
-        if sl.iloc[i-1]: last_sl = df['low'].iloc[i-1]
-        c = df['close'].iloc[i]
-        if last_sh and c > last_sh:
-            (choch_b if trend == 'down' else bull_bos).iloc[i] = True
-            trend = 'up'
-        if last_sl and c < last_sl:
-            (choch_s if trend == 'up' else bear_bos).iloc[i] = True
-            trend = 'down'
-
-    return bull_bos, bear_bos, choch_b, choch_s
 
 def detect_order_blocks(df, sh, sl, lookback=3):
     obs = []
@@ -338,7 +349,7 @@ def run_backtest(symbol: str,
             equity_curve.append(capital)
             continue
 
-        # ── Update open trade (SL/TP check)
+        # ── Update open trade
         if open_trade and open_trade.is_open:
             t  = open_trade
             sl = t.trailing_sl if t.trailing_sl else t.sl_price
@@ -351,8 +362,8 @@ def run_backtest(symbol: str,
                     TP_RATIOS[k] for k in range(3)
                     if not t.partial_closed[k]
                 ) * t.size
-                pnl_move = (sl - t.entry_price) if t.direction == 'long' \
-                           else (t.entry_price - sl)
+                pnl_move      = (sl - t.entry_price) if t.direction == 'long' \
+                                else (t.entry_price - sl)
                 t.pnl        += (pnl_move / t.entry_price) * remaining
                 t.is_open     = False
                 t.exit_reason = 'SL'
@@ -367,9 +378,9 @@ def run_backtest(symbol: str,
                     hit_tp = (t.direction == 'long'  and high >= tp) or \
                              (t.direction == 'short' and low  <= tp)
                     if hit_tp:
-                        partial_size = TP_RATIOS[k] * t.size
-                        pnl_move     = (tp - t.entry_price) if t.direction == 'long' \
-                                       else (t.entry_price - tp)
+                        partial_size        = TP_RATIOS[k] * t.size
+                        pnl_move            = (tp - t.entry_price) if t.direction == 'long' \
+                                              else (t.entry_price - tp)
                         t.pnl              += (pnl_move / t.entry_price) * partial_size
                         t.partial_closed[k] = True
                         if k == 0:
@@ -433,8 +444,22 @@ def run_backtest(symbol: str,
         if pd.isna(stk) or pd.isna(std_):
             equity_curve.append(capital)
             continue
-        stoch_ok = (bias == 'bullish' and stk < 30 and stk > std_) or \
-                   (bias == 'bearish' and stk > 70 and stk < std_)
+
+        stk_prev  = df_15m['stk'].iloc[i-1]
+        std_prev  = df_15m['std'].iloc[i-1]
+
+        cross_up   = stk > std_ and stk_prev <= std_prev
+        cross_down = stk < std_ and stk_prev >= std_prev
+        oversold   = stk < 20 and std_ < 20
+        overbought = stk > 80 and std_ > 80
+
+        stoch_full = (bias == 'bullish' and cross_up   and oversold) or \
+                     (bias == 'bearish' and cross_down and overbought)
+        stoch_soft = (bias == 'bullish' and cross_up   and stk < 50) or \
+                     (bias == 'bearish' and cross_down and stk > 50)
+
+        stoch_ok = stoch_full 
+
         if not stoch_ok:
             equity_curve.append(capital)
             continue
@@ -483,13 +508,13 @@ def run_backtest(symbol: str,
 
     # Close trade yang masih open di akhir data
     if open_trade and open_trade.is_open:
-        last     = df_15m['close'].iloc[-1]
-        pm       = (last - open_trade.entry_price) if open_trade.direction == 'long' \
-                   else (open_trade.entry_price - last)
-        open_trade.pnl        = (pm / open_trade.entry_price) * open_trade.size
-        open_trade.is_open    = False
+        last                   = df_15m['close'].iloc[-1]
+        pm                     = (last - open_trade.entry_price) if open_trade.direction == 'long' \
+                                 else (open_trade.entry_price - last)
+        open_trade.pnl         = (pm / open_trade.entry_price) * open_trade.size
+        open_trade.is_open     = False
         open_trade.exit_reason = 'END_OF_DATA'
-        capital += open_trade.pnl
+        capital               += open_trade.pnl
         trades.append(open_trade)
 
     return _compute_stats(symbol, trades, equity_curve)
@@ -500,9 +525,7 @@ def run_backtest(symbol: str,
 def _compute_stats(symbol, trades, equity_curve) -> BacktestResult:
     if not trades:
         print(f"  {symbol}: tidak ada trade.")
-        return BacktestResult(
-            symbol=symbol, trades=[], equity_curve=equity_curve
-        )
+        return BacktestResult(symbol=symbol, trades=[], equity_curve=equity_curve)
 
     wins = [t for t in trades if t.pnl > 0]
     loss = [t for t in trades if t.pnl <= 0]
@@ -515,11 +538,9 @@ def _compute_stats(symbol, trades, equity_curve) -> BacktestResult:
     dd        = (eq - eq.cummax()) / eq.cummax()
     max_dd    = dd.min()
     ret       = eq.pct_change().dropna()
-    sharpe    = (ret.mean() / ret.std() * np.sqrt(252 * 96)) \
-                if ret.std() > 0 else 0
+    sharpe    = (ret.mean() / ret.std() * np.sqrt(252 * 96)) if ret.std() > 0 else 0
     total_ret = (equity_curve[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL
 
-    # Print ke terminal
     print(f"\n{'─'*50}")
     print(f"  {symbol}")
     print(f"{'─'*50}")
@@ -530,8 +551,6 @@ def _compute_stats(symbol, trades, equity_curve) -> BacktestResult:
     print(f"  Sharpe Ratio   : {sharpe:.2f}")
     print(f"  Total Return   : {total_ret:+.2%}")
     print(f"  Final Capital  : ${equity_curve[-1]:.2f}")
-
-    # Diagnosis otomatis
     print(f"\n  💡 Diagnosis:")
     if wr < 0.40:
         print("     Win rate < 40% → longgarkan stoch threshold ke 35/65")
@@ -543,21 +562,15 @@ def _compute_stats(symbol, trades, equity_curve) -> BacktestResult:
         print("     ✅ Hasil bagus! Siap lanjut optimize.")
 
     return BacktestResult(
-        symbol        = symbol,
-        trades        = trades,
-        equity_curve  = equity_curve,
-        win_rate      = wr,
-        profit_factor = pf,
-        max_drawdown  = max_dd,
-        sharpe_ratio  = sharpe,
-        total_return  = total_ret,
+        symbol=symbol, trades=trades, equity_curve=equity_curve,
+        win_rate=wr, profit_factor=pf, max_drawdown=max_dd,
+        sharpe_ratio=sharpe, total_return=total_ret,
     )
 
 # ─────────────────────────────────────────────────────────────
 # PLOT EQUITY CURVE
 # ─────────────────────────────────────────────────────────────
 def plot_results(results: list) -> str:
-    """Buat chart equity curve, return path file PNG."""
     n    = len(results)
     fig, axes = plt.subplots(n, 1, figsize=(12, 5 * n))
     if n == 1:
@@ -566,25 +579,17 @@ def plot_results(results: list) -> str:
     for ax, r in zip(axes, results):
         eq = pd.Series(r.equity_curve)
         ax.plot(eq.values, color='#2196F3', linewidth=1.5, label='Equity')
-        ax.axhline(
-            INITIAL_CAPITAL, color='gray',
-            linewidth=0.8, linestyle='--', label='Modal awal'
-        )
-        ax.fill_between(
-            range(len(eq)), INITIAL_CAPITAL, eq.values,
-            where=eq.values >= INITIAL_CAPITAL,
-            alpha=0.15, color='#4CAF50'
-        )
-        ax.fill_between(
-            range(len(eq)), INITIAL_CAPITAL, eq.values,
-            where=eq.values < INITIAL_CAPITAL,
-            alpha=0.15, color='#F44336'
-        )
+        ax.axhline(INITIAL_CAPITAL, color='gray', linewidth=0.8,
+                   linestyle='--', label='Modal awal')
+        ax.fill_between(range(len(eq)), INITIAL_CAPITAL, eq.values,
+                        where=eq.values >= INITIAL_CAPITAL,
+                        alpha=0.15, color='#4CAF50')
+        ax.fill_between(range(len(eq)), INITIAL_CAPITAL, eq.values,
+                        where=eq.values < INITIAL_CAPITAL,
+                        alpha=0.15, color='#F44336')
         ax.set_title(
-            f"{r.symbol}  |  WR: {r.win_rate:.1%}  "
-            f"PF: {r.profit_factor:.2f}  "
-            f"DD: {r.max_drawdown:.2%}  "
-            f"Return: {r.total_return:+.2%}",
+            f"{r.symbol}  |  WR: {r.win_rate:.1%}  PF: {r.profit_factor:.2f}  "
+            f"DD: {r.max_drawdown:.2%}  Return: {r.total_return:+.2%}",
             fontsize=11
         )
         ax.set_xlabel('Bar (15M candle)')
@@ -593,10 +598,8 @@ def plot_results(results: list) -> str:
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-
-    # Simpan di folder yang sama dengan script ini
-    script_dir  = os.path.dirname(os.path.abspath(__file__))
-    chart_path  = os.path.join(script_dir, 'backtest_result.png')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    chart_path = os.path.join(script_dir, 'backtest_result.png')
     plt.savefig(chart_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"\n  Chart disimpan: {chart_path}")
@@ -606,20 +609,17 @@ def plot_results(results: list) -> str:
 # KIRIM KE TELEGRAM
 # ─────────────────────────────────────────────────────────────
 def send_to_telegram(results: list, chart_path: str):
-    """Kirim summary + chart equity curve ke Telegram."""
     if not results:
         _tg_send("⚠️ <b>Backtest selesai</b> — tidak ada hasil.")
         return
 
-    lines = "📊 <b>BACKTEST RESULT — VortexBot</b>\n"
+    lines  = "📊 <b>BACKTEST RESULT — VortexBot</b>\n"
     lines += "=" * 35 + "\n"
 
     for r in results:
-        ok     = r.win_rate >= 0.45 and r.profit_factor >= 1.5 \
-                 and r.max_drawdown > -0.20
+        ok     = r.win_rate >= 0.45 and r.profit_factor >= 1.5 and r.max_drawdown > -0.20
         status = "✅" if ok else "⚠️"
         sign   = "+" if r.total_return >= 0 else ""
-
         lines += (
             f"\n{status} <b>{r.symbol}</b>\n"
             f"  Trades   : {len(r.trades)}\n"
@@ -630,32 +630,22 @@ def send_to_telegram(results: list, chart_path: str):
             f"  Return   : <b>{sign}{r.total_return:.2%}</b>\n"
             f"  Capital  : <b>${r.equity_curve[-1]:.2f}</b>\n"
         )
-
         diag = []
-        if r.win_rate < 0.40:
-            diag.append("WR rendah → longgarkan stoch")
-        if r.profit_factor < 1.5:
-            diag.append("PF rendah → naikkan TP1 RR")
-        if r.max_drawdown < -0.20:
-            diag.append("DD tinggi → kurangi risk/trade")
-        if not diag:
-            diag.append("Siap dioptimasi lebih lanjut ✅")
+        if r.win_rate < 0.40:    diag.append("WR rendah → longgarkan stoch")
+        if r.profit_factor < 1.5: diag.append("PF rendah → naikkan TP1 RR")
+        if r.max_drawdown < -0.20: diag.append("DD tinggi → kurangi risk/trade")
+        if not diag:              diag.append("Siap dioptimasi lebih lanjut ✅")
         lines += f"  💡 {' | '.join(diag)}\n"
 
     lines += f"\n{'='*35}"
 
     print("\n  Mengirim hasil ke Telegram...")
-    ok_msg = _tg_send(lines)
-    if ok_msg:
+    if _tg_send(lines):
         print("  ✅ Teks terkirim ke Telegram")
     else:
         print("  ❌ Gagal kirim teks ke Telegram")
 
-    ok_photo = _tg_send_photo(
-        chart_path,
-        caption="📈 Equity Curve — VortexBot Backtest"
-    )
-    if ok_photo:
+    if _tg_send_photo(chart_path, caption="📈 Equity Curve — VortexBot Backtest"):
         print("  ✅ Chart terkirim ke Telegram")
     else:
         print("  ❌ Gagal kirim chart ke Telegram")
@@ -668,20 +658,19 @@ if __name__ == '__main__':
     print("  VortexBot Backtesting — SMC Multi-TF")
     print("=" * 50)
 
-    # Cek apakah Telegram sudah dikonfigurasi
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         print(f"  📱 Telegram: aktif (chat_id: {TELEGRAM_CHAT_ID})")
     else:
-        print("  📱 Telegram: tidak aktif (set env TELEGRAM_TOKEN & TELEGRAM_CHAT_ID)")
+        print("  📱 Telegram: tidak aktif — set env TELEGRAM_TOKEN & TELEGRAM_CHAT_ID")
 
     all_results = []
 
     for symbol in PAIRS:
         print(f"\n⏳ Loading data: {symbol}")
-        df_15m = fetch_ohlcv(symbol, '15m', limit=2000)
-        df_1h  = fetch_ohlcv(symbol, '1h',  limit=1000)
-        df_4h  = fetch_ohlcv(symbol, '4h',  limit=500)
-
+        df_15m = fetch_ohlcv(symbol, '15m', limit=50000)
+        df_1h  = fetch_ohlcv(symbol, '1h',  limit=8000)
+        df_4h  = fetch_ohlcv(symbol, '4h',  limit=2000)
+        
         if df_15m.empty or df_1h.empty or df_4h.empty:
             print(f"  ⚠️  Skip {symbol} — data kosong")
             continue
@@ -693,22 +682,15 @@ if __name__ == '__main__':
         print("\n  Tidak ada hasil — cek koneksi internet.")
         sys.exit(1)
 
-    # Summary di terminal
     print(f"\n{'='*50}")
     print("  SUMMARY SEMUA PAIR")
     print(f"{'='*50}")
     for r in all_results:
         ok     = r.win_rate >= 0.45 and r.profit_factor >= 1.5
         status = "✅" if ok else "⚠️ "
-        print(
-            f"  {status} {r.symbol:<20} "
-            f"WR: {r.win_rate:.1%}  "
-            f"PF: {r.profit_factor:.2f}  "
-            f"Return: {r.total_return:+.2%}"
-        )
+        print(f"  {status} {r.symbol:<20} WR: {r.win_rate:.1%}  "
+              f"PF: {r.profit_factor:.2f}  Return: {r.total_return:+.2%}")
 
-    # Plot & kirim ke Telegram
     chart_path = plot_results(all_results)
     send_to_telegram(all_results, chart_path)
-
     print("\n  Selesai! ✅")

@@ -2,25 +2,34 @@
 # VORTEX BOT - VWAP ANALYSIS
 # ============================================
 #
-# FIX v1.4 (baru):
-#   - calculate_vwap_bands sekarang pakai ROLLING window
-#     (default 20 candle) untuk hitung std dev, BUKAN
-#     cumulative dari awal hari (00:00 UTC).
+# FIX v2.0 (baru — SOFT SCORE, no hard block):
+#   VWAP diubah dari HARD BLOCK jadi SOFT SCORE saja.
 #
-#     KENAPA INI BUG: cumulative variance = rata-rata
-#     deviasi SEPANJANG HARI. Begitu market trending
-#     searah beberapa jam, deviasi SAAT INI jauh lebih
-#     besar dari rata-rata historis hari itu -> flag
-#     "overextended" jadi True HAMPIR TERUS-MENERUS di
-#     jam-jam belakangan sesi (NY session khususnya),
-#     padahal itu trend valid bukan blow-off/exhaustion.
-#     Inilah penyebab hard block VWAP nyala nyaris tiap
-#     signal.
+#   KENAPA: VWAP mean-reversion filter (harga harus deket
+#   VWAP baru boleh entry) itu logic buat market SIDEWAYS.
+#   Bot ini pakai strategi SMC + killzone session + BTC
+#   correlation, yang semuanya trend/momentum-following.
+#   Dua filosofi ini bentrok — pas market trending kuat
+#   (harga jauh dari VWAP = ciri momentum, BUKAN "kemahalan"),
+#   hard block VWAP lama malah nolak entry yang justru bagus.
 #
-# FIX v1.3 (sebelumnya, tetap dipertahankan):
-#   - Session-aware tolerance
-#   - Per-session VWAP (London & NY terpisah)
-#   - Hard block hanya untuk overextended BERLAWANAN arah
+#   Sekarang VWAP TIDAK PERNAH bikin signal di-skip. Dia cuma
+#   nambah/kurang score_bonus:
+#     +2 → zona ideal (discount buat BUY / premium buat SELL) & tidak overextended
+#     +1 → near VWAP (dalam tolerance session)
+#      0 → zona kurang ideal tapi wajar
+#     -1 → overextended BERLAWANAN arah sinyal (dulu ini hard block)
+#   "pass" SELALU True (kecuali data invalid/disabled, yang
+#   juga selalu True by design lama).
+#
+# FIX v1.4 (tetap dipertahankan):
+#   - calculate_vwap_bands pakai ROLLING window (20 candle),
+#     bukan cumulative dari awal hari, biar band merefleksikan
+#     volatilitas terkini bukan rata-rata sepanjang hari.
+#
+# FIX v1.3 (tetap dipertahankan):
+#   - Session-aware tolerance (London 0.5%, NY 1.0%, off 0.3%)
+#   - Per-session VWAP (London & NY terpisah) sebagai info
 
 import pandas as pd
 import numpy as np
@@ -103,12 +112,9 @@ class VWAPAnalysis:
                              window: int = 20) -> dict:
         """
         VWAP bands ±1 std dev untuk deteksi overextended.
-
-        FIX v1.4: pakai ROLLING window (default 20 candle)
-        untuk hitung variance, bukan cumsum dari awal hari.
-        Ini bikin band merefleksikan volatilitas TERKINI,
-        bukan rata-rata sepanjang hari yang bias saat
-        market lagi trending.
+        Pakai ROLLING window (default 20 candle), bukan
+        cumsum dari awal hari, biar band merefleksikan
+        volatilitas TERKINI.
         """
         try:
             typical_price = (
@@ -150,9 +156,6 @@ class VWAPAnalysis:
         """
         Hitung VWAP harian dari data 1H.
         Reset tiap 00:00 UTC — standar institusi.
-
-        Tolerance dinamis per session (v1.3), band
-        overextended pakai rolling window (v1.4).
         """
         try:
             if df_1h.empty or len(df_1h) < 2:
@@ -288,24 +291,24 @@ class VWAPAnalysis:
             logger.error(f"❌ Session VWAP error: {e}")
             return {"valid": False}
 
-    # ─── VWAP FILTER ────────────────────────
+    # ─── VWAP FILTER (SOFT SCORE — NO HARD BLOCK) ──
 
     def check_vwap_filter(self,
                           direction: str,
                           vwap_data: dict) -> dict:
         """
-        Filter entry berdasarkan posisi harga vs VWAP.
-
-        Hard block HANYA untuk kondisi:
-          - BUY  + overextended di atas VWAP
-          - SELL + overextended di bawah VWAP
-          - DAN sudah jauh > 2x tolerance dari VWAP
+        FIX v2.0: VWAP TIDAK PERNAH nge-block signal lagi.
+        "pass" selalu True. Fungsi ini sekarang cuma nentuin
+        score_bonus (bisa negatif) buat ngasih bobot ke
+        confluence score, bukan gate lolos/skip.
 
         Score bonus:
-          +2 → zona ideal + tidak overextended
+          +2 → zona ideal (discount/BUY atau premium/SELL) & tidak overextended
           +1 → near VWAP (dalam tolerance session)
-           0 → zona kurang ideal tapi tidak hard block
-        FAIL → overextended berlawanan arah (benar-benar counter)
+           0 → di zona kurang ideal tapi wajar (dalam batas normal)
+          -1 → overextended BERLAWANAN arah sinyal — sinyal tetap
+               boleh lanjut (biar gak miss entry pas trending),
+               tapi confidence-nya diturunin
         """
         try:
             if not vwap_data.get("valid"):
@@ -335,73 +338,77 @@ class VWAPAnalysis:
                 "vwap_value": vwap_val,
                 "near_vwap" : near_vwap,
                 "session"   : session,
+                "pass"      : True,   # ← selalu True, gak pernah block
             }
 
-            hard_block_threshold = tolerance * 2
+            extreme_threshold = tolerance * 2
 
             if direction == "BUY":
                 if side == "below" and not overextended:
-                    return {**base, "pass": True, "score_bonus": 2,
+                    return {**base, "score_bonus": 2,
                             "reason": (
                                 f"✅ VWAP: DISCOUNT zone "
                                 f"({diff_pct:+.2f}%) — ideal BUY"
                             )}
                 elif near_vwap:
-                    return {**base, "pass": True, "score_bonus": 1,
+                    return {**base, "score_bonus": 1,
                             "reason": (
                                 f"⚠️ VWAP: near VWAP "
                                 f"({diff_pct:+.2f}%) [{session}] "
                                 f"— acceptable"
                             )}
                 elif (side == "above" and
-                      abs(diff_pct) > hard_block_threshold and
+                      abs(diff_pct) > extreme_threshold and
                       overextended):
-                    return {**base, "pass": False, "score_bonus": 0,
+                    # Dulu hard block, sekarang cuma nurunin skor
+                    return {**base, "score_bonus": -1,
                             "reason": (
-                                f"❌ VWAP: BUY overextended "
+                                f"⚠️ VWAP: BUY overextended "
                                 f"({diff_pct:+.2f}% > "
-                                f"{hard_block_threshold:.1f}%) — skip"
+                                f"{extreme_threshold:.1f}%) — "
+                                f"boleh lanjut, confidence dikurangi"
                             )}
                 else:
-                    return {**base, "pass": True, "score_bonus": 0,
+                    return {**base, "score_bonus": 0,
                             "reason": (
                                 f"⚠️ VWAP: BUY di PREMIUM "
                                 f"({diff_pct:+.2f}%) [{session}] "
-                                f"— tidak ideal tapi boleh"
+                                f"— tidak ideal tapi wajar"
                             )}
 
             elif direction == "SELL":
                 if side == "above" and not overextended:
-                    return {**base, "pass": True, "score_bonus": 2,
+                    return {**base, "score_bonus": 2,
                             "reason": (
                                 f"✅ VWAP: PREMIUM zone "
                                 f"({diff_pct:+.2f}%) — ideal SELL"
                             )}
                 elif near_vwap:
-                    return {**base, "pass": True, "score_bonus": 1,
+                    return {**base, "score_bonus": 1,
                             "reason": (
                                 f"⚠️ VWAP: near VWAP "
                                 f"({diff_pct:+.2f}%) [{session}] "
                                 f"— acceptable"
                             )}
                 elif (side == "below" and
-                      abs(diff_pct) > hard_block_threshold and
+                      abs(diff_pct) > extreme_threshold and
                       overextended):
-                    return {**base, "pass": False, "score_bonus": 0,
+                    return {**base, "score_bonus": -1,
                             "reason": (
-                                f"❌ VWAP: SELL overextended bawah "
+                                f"⚠️ VWAP: SELL overextended bawah "
                                 f"({diff_pct:+.2f}% > "
-                                f"{hard_block_threshold:.1f}%) — skip"
+                                f"{extreme_threshold:.1f}%) — "
+                                f"boleh lanjut, confidence dikurangi"
                             )}
                 else:
-                    return {**base, "pass": True, "score_bonus": 0,
+                    return {**base, "score_bonus": 0,
                             "reason": (
                                 f"⚠️ VWAP: SELL di DISCOUNT "
                                 f"({diff_pct:+.2f}%) [{session}] "
-                                f"— tidak ideal tapi boleh"
+                                f"— tidak ideal tapi wajar"
                             )}
 
-            return {**base, "pass": True, "score_bonus": 0,
+            return {**base, "score_bonus": 0,
                     "reason": "Direction unknown — bypassed"}
 
         except Exception as e:
@@ -420,6 +427,7 @@ class VWAPAnalysis:
         """
         Deteksi mean reversion ke VWAP.
         Kondisi: overextended + volume exhaustion.
+        (Info tambahan saja, tidak dipakai buat block.)
         """
         try:
             if not vwap_data.get("valid"):
@@ -465,8 +473,8 @@ class VWAPAnalysis:
     def analyze(self, df_1h: pd.DataFrame,
                 direction: str) -> dict:
         """
-        Full VWAP analysis dengan session-aware tolerance
-        dan rolling-window overextended detection.
+        Full VWAP analysis — SOFT SCORE only, tidak pernah
+        block entry. "pass" selalu True.
         """
         try:
             if not cfg.VWAP_ENABLED:
@@ -505,7 +513,7 @@ class VWAPAnalysis:
                 "tolerance_pct" : vwap_data.get(
                     "tolerance_pct", cfg.VWAP_TOLERANCE_PCT
                 ),
-                "pass"          : filter_res.get("pass", True),
+                "pass"          : True,   # ← selalu True (v2.0)
                 "reason"        : filter_res.get("reason", ""),
                 "score_bonus"   : filter_res.get("score_bonus", 0),
                 "reversion"     : reversion,

@@ -1,6 +1,17 @@
 # ============================================
-# VORTEX BOT v1.3b - MAIN ENGINE
-# FIX v1.3b:
+# VORTEX BOT v1.3c - MAIN ENGINE
+# FIX v1.3c:
+#   - BUG FIX: Regime cache expired (6 jam) tapi cuma
+#     di-refresh sekali sehari lewat morning_briefing
+#     (00:00 WIB). Akibatnya ±18 jam/hari get_cached_regime()
+#     jatuh ke UNKNOWN -> regime_score_boost() diam-diam +1
+#     -> threshold efektif naik dari 15 jadi 16 tanpa disadari.
+#     FIX: tambah scheduled job _refresh_regime() tiap 5 jam,
+#     supaya cache regime selalu fresh dan boost cuma aktif
+#     kalau regime BENERAN ranging/high-vol/unknown, bukan
+#     gara-gara cache basi.
+# ============================================
+# FIX v1.3b (dipertahankan):
 #   - Regime di-detect saat startup() supaya tidak
 #     UNKNOWN setelah redeploy. Sebelumnya hanya
 #     refresh di morning_briefing jam 00:00 WIB.
@@ -76,7 +87,7 @@ class VortexBot:
 
     def __init__(self):
         self.name        = "VΦrtex Bot"
-        self.version     = "1.3b"
+        self.version     = "1.3c"
         self.running     = False
         self.start_time  = None
         self.pairs       = cfg.PAIRS
@@ -132,29 +143,9 @@ class VortexBot:
             _okx._virtual_balance = vb
             logger.info(f"💰 Virtual balance synced: ${vb:.4f}")
 
-        # FIX v1.3b: Detect regime saat startup supaya tidak UNKNOWN
+        # Detect regime saat startup supaya tidak UNKNOWN
         # setelah redeploy — sebelumnya hanya refresh di morning_briefing
-        try:
-            logger.info("🌍 Detecting market regime on startup...")
-            ohlcv_1d = exchange.get_ohlcv(
-                self.pairs[0], "1D", limit=200
-            )
-            if ohlcv_1d:
-                df_1d  = indicators.ohlcv_to_df(ohlcv_1d)
-                regime = risk_manager.detect_market_regime(df_1d)
-                logger.info(
-                    f"🌍 Startup regime: "
-                    f"{regime.get('emoji','')} "
-                    f"{regime.get('regime','?')} | "
-                    f"boost=+{risk_manager.get_regime_score_boost()}"
-                )
-            else:
-                logger.warning(
-                    "⚠️ Tidak bisa fetch 1D data untuk regime — "
-                    "akan coba lagi di morning briefing"
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ Startup regime detect error: {e}")
+        self._refresh_regime(context="startup")
 
         tg_ok = telegram.test_connection()
         if not tg_ok:
@@ -205,6 +196,53 @@ class VortexBot:
                 "date_wib": now_wib().isoformat(),
                 "date_utc": now_utc().isoformat(),
             })
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # REGIME REFRESH  (FIX v1.3c)
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _refresh_regime(self, context: str = "scheduled"):
+        """
+        Refresh market regime cache.
+
+        FIX v1.3c: sebelumnya HANYA dipanggil di startup() dan
+        _morning_briefing() (jam 00:00 WIB). Karena cache regime
+        expired setelah 6 jam (lihat risk/management.py
+        get_cached_regime), selama ±18 jam/hari cache jatuh ke
+        UNKNOWN dan get_regime_score_boost() diam-diam nambah +1
+        ke threshold efektif — padahal regime aslinya belum tentu
+        beneran "unknown".
+
+        Dipanggil dari 3 tempat sekarang:
+          1. startup()              -> supaya tidak UNKNOWN abis redeploy
+          2. schedule tiap 5 jam     -> supaya cache tidak pernah expired
+          3. _morning_briefing()    -> tetap ada untuk laporan pagi
+        """
+        try:
+            ohlcv_1d = exchange.get_ohlcv(
+                self.pairs[0], "1D", limit=200
+            )
+            if not ohlcv_1d:
+                logger.warning(
+                    f"⚠️ [{context}] Tidak bisa fetch 1D data "
+                    f"untuk regime — akan dicoba lagi di refresh berikutnya"
+                )
+                return None
+
+            df_1d  = indicators.ohlcv_to_df(ohlcv_1d)
+            regime = risk_manager.detect_market_regime(df_1d)
+            logger.info(
+                f"🌍 [{context}] Regime refreshed: "
+                f"{regime.get('emoji','')} "
+                f"{regime.get('regime','?')} | "
+                f"boost=+{risk_manager.get_regime_score_boost()} | "
+                f"{wib_str()}"
+            )
+            return regime
+
+        except Exception as e:
+            logger.warning(f"⚠️ [{context}] Regime refresh error: {e}")
+            return None
 
     # ═════════════════════════════════════════════════════════════════════════
     # NEWS BLOCK HELPER
@@ -334,7 +372,8 @@ class VortexBot:
                 f"VWAP{vwap_ok}({vwap_zone}/{vwap_sess}) "
                 f"Fund{fund_ok}({fund_rate:+.3f}%) "
                 f"Corr{corr_ok}({corr_trend}) | "
-                f"Score:{score}/{effective_min}"
+                f"Score:{score}/24 "
+                f"(min:{effective_min}/24)"
             )
 
         except Exception as e:
@@ -352,7 +391,7 @@ class VortexBot:
             # ── STEP 1: SESSION FILTERS ──────────────────────────────────────
             session_info = session_filter.get_session_info()
 
-            # FIX v1.3b: should_avoid tidak lagi mencakup in_delay
+            # should_avoid tidak lagi mencakup in_delay
             # in_delay dihandle terpisah — bot tetap analisis pair
             if session_info.get("should_avoid"):
                 reason = session_info.get("avoid_reason", "")
@@ -600,8 +639,8 @@ class VortexBot:
                     )
                 else:
                     reason = (
-                        f"score {score}/{effective_min} "
-                        f"below threshold"
+                        f"score {score}/24 "
+                        f"below threshold {effective_min}/24"
                     )
                 logger.info(
                     f"⏭️ {pair}: {reason} ({grade}) "
@@ -704,7 +743,7 @@ class VortexBot:
             logger.info(
                 f"🎯 VALID SIGNAL!\n"
                 f"   {pair} {direction} "
-                f"Score:{score}/{effective_min} ({grade}) "
+                f"Score:{score}/24 (min:{effective_min}/24) ({grade}) "
                 f"RR:1:{rr2:.1f} "
                 f"SL:{tp_sl.get('sl_pct', 0):.2f}% "
                 f"BP:{bp_mode} "
@@ -743,7 +782,7 @@ class VortexBot:
                 )
                 return
 
-            # FIX v1.3b: skip execute jika masih dalam delay window
+            # skip execute jika masih dalam delay window
             killzone = session_filter.is_killzone()
             if not killzone.get("in_killzone") and killzone.get("in_delay"):
                 logger.info(
@@ -1135,9 +1174,17 @@ class VortexBot:
         schedule.every().sunday.at("17:01").do(self._reset_weekly_balance)
         schedule.every().day.at("17:01").do(self._check_monthly_reset)
 
+        # FIX v1.3c: regime cache expired tiap 6 jam tapi dulu cuma
+        # di-refresh sekali sehari (morning briefing) -> ±18 jam/hari
+        # threshold efektif diam-diam naik +1 gara-gara cache basi,
+        # bukan karena regime beneran berubah. Refresh tiap 5 jam
+        # supaya cache selalu fresh sebelum sempat expired (6 jam).
+        schedule.every(5).hours.do(self._refresh_regime, context="scheduled")
+
         logger.info(
             "📅 Scheduled tasks configured!\n"
             "   Morning   : 00:00 WIB\n"
+            "   Regime    : tiap 5 jam (FIX v1.3c)\n"
             "   London    : 10:00 WIB\n"
             "   Daily sum : 15:00 WIB\n"
             "   NY sum    : 16:00 WIB\n"
@@ -1155,13 +1202,10 @@ class VortexBot:
         try:
             balance  = exchange.get_balance().get("free", 0)
             upcoming = news_filter.get_upcoming_news(hours_ahead=12)
-            ohlcv_1d = exchange.get_ohlcv(
-                self.pairs[0], "1D", limit=200
-            )
-            df_1d  = indicators.ohlcv_to_df(ohlcv_1d)
-            regime = risk_manager.detect_market_regime(df_1d)
+            regime   = self._refresh_regime(context="morning_briefing")
+            regime_name = regime.get("regime", "UNKNOWN") if regime else "UNKNOWN"
             telegram.send_morning_briefing(
-                balance, upcoming, regime.get("regime", "UNKNOWN")
+                balance, upcoming, regime_name
             )
             logger.info(f"☀️ Morning briefing | {wib_str()}")
         except Exception as e:
@@ -1411,7 +1455,7 @@ class VortexBot:
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════╗
-║         VΦrtex Bot v1.3b                 ║
+║         VΦrtex Bot v1.3c                 ║
 ║   Institutional Grade Trading Bot        ║
 ║   SMC + Fibonacci + BP + VWAP            ║
 ║   Funding + Correlation + Regime         ║

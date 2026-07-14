@@ -423,7 +423,7 @@ class TelegramNotifier:
                     f"  News clear   : 1\n"
                     f"  [+1 upgrade] : 1\n"
                     f"{'='*32}\n"
-                    f"Ubah di Railway: MIN_CONFLUENCE_SCORE=11"
+                    f"Ubah di Railway: MIN_CONFLUENCE_SCORE=15"
                 )
 
             elif cmd == "/strategy":

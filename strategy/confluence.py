@@ -37,7 +37,7 @@
 #   TOTAL              : 24
 #
 # Phase guide (Railway Variables):
-#   Demo Phase 1 : MIN_CONFLUENCE_SCORE=11
+#   Demo Phase 1 : MIN_CONFLUENCE_SCORE=15
 #   Demo Phase 2 : MIN_CONFLUENCE_SCORE=15
 #   Live         : MIN_CONFLUENCE_SCORE=18
 

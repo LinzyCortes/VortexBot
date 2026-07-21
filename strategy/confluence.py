@@ -2,44 +2,52 @@
 # VORTEX BOT - CONFLUENCE SCORING SYSTEM
 # ============================================
 #
-# Breakdown 24 poin:
+# REDESIGN v3.0 (berdasarkan backtest_train_test_split.py -- VALIDASI
+# OUT-OF-SAMPLE, metodologi paling ketat sejauh ini):
 #
-#   TEKNIKAL (5)
-#     EMA align        : 1
-#     Stoch (5,3,3)    : 2
-#     Volume           : 1
-#     Candle pattern   : 1
+#   v2.1 divalidasi pakai train/test split kronologis (70% data awal
+#   buat cari pola, 30% data akhir yang BELUM PERNAH disentuh buat
+#   validasi). Hasilnya PENTING:
 #
-#   BREAKOUT & PULLBACK (3)
-#     Breakout         : 2
-#     Pullback         : 1
+#   TEMUAN KRITIS: expectancy keseluruhan v2.1 di TEST set = -0.044R
+#   (PF 0.94), padahal di TRAIN set +0.154R (PF 1.18). Bukti overfitting
+#   di level SISTEM, bukan cuma komponen individual -- 3 ronde
+#   "konsisten" sebelumnya ternyata masih nguji periode data yang sama,
+#   BUKAN validasi asli.
 #
-#   SMC (7)
-#     BOS/CHoCH fresh  : 2  (stale = 1 poin)
-#     Order Block      : 2
-#     FVG              : 1
-#     Liquidity swept  : 1
-#     Premium/Discount : 1
+#   TERVALIDASI (searah & signifikan di TRAIN dan TEST, paling dipercaya):
+#     bos_confirmed : Train +0.493R, Test +0.311R -> naik 1->2
+#     candle_ok     : Train +0.727R, Test +0.338R -> naik 1->2
 #
-#   FIBONACCI (3)
-#     Fib 0.618        : 2
-#     Fib 0.500        : 1
+#   GAGAL VALIDASI (arah kebalik train vs test -- ternyata cuma noise,
+#   TERMASUK liquidity_swept yang sebelumnya kita naikin paling tinggi!):
+#     liquidity_swept : Train +0.474R, Test -0.171R -> TURUN dari 3 ke 1
+#                        (revert ke bobot awal, boost sebelumnya salah)
+#     ema_aligned     : Train -0.066R, Test +0.317R -> tetap 1 (tidak diubah)
+#     volume_ok       : Train +0.078R, Test -0.023R -> tetap 1 (tidak diubah)
 #
-#   INSTITUTIONAL (4)
-#     VWAP zone        : 2
-#     Funding rate     : 1
-#     BTC Correlation  : 1
+#   BORDERLINE (searah tapi di bawah ambang batas -- perlu data lebih
+#   banyak sebelum diputuskan, TIDAK diubah dulu):
+#     fib_50   : Train +0.150R, Test +0.320R (searah, tapi train pas di
+#                garis batas -- tetap 2, tidak dinaikkan lagi dulu)
+#     stoch_ok : Train +0.126R, Test +0.712R (searah, gap test besar,
+#                tapi train di bawah ambang -- tetap 2, worth diteliti lagi)
+#     vwap_ok  : Train +0.089R, Test +0.232R (searah, kecil -- tetap 2)
 #
-#   FILTER (2)
-#     Killzone         : 1
-#     News clear       : 1
+#   PENTING: total max_score TETAP 21 (candle_ok +1, bos_confirmed +1,
+#   liquidity_swept -2 -- saling menutupi).
 #
-#   TOTAL              : 24
+#   WAJIB: bot ini BELUM TERBUKTI profitable out-of-sample (test set
+#   masih -0.044R di v2.1). Setelah revisi v3.0 ini, WAJIB backtest
+#   ulang dengan train/test split LAGI -- idealnya pakai window waktu
+#   yang berbeda dari sebelumnya, supaya benar-benar independen dan
+#   tidak ke-"intip" lagi. JANGAN pertimbangkan demo/live sebelum test
+#   set menunjukkan expectancy positif yang konsisten.
 #
-# Phase guide (Railway Variables):
-#   Demo Phase 1 : MIN_CONFLUENCE_SCORE=15
-#   Demo Phase 2 : MIN_CONFLUENCE_SCORE=15
-#   Live         : MIN_CONFLUENCE_SCORE=18
+# Phase guide (Railway Variables) -- REKOMENDASI SEMENTARA, validasi dulu:
+#   Demo Phase 1 : MIN_CONFLUENCE_SCORE=9   (dari skala baru /21)
+#   Demo Phase 2 : MIN_CONFLUENCE_SCORE=13
+#   Live         : MIN_CONFLUENCE_SCORE=16
 
 import pandas as pd
 from config import cfg
@@ -54,23 +62,23 @@ class ConfluenceScorer:
             "ema_aligned"      : {"points": 1, "desc": "EMA 13/21 aligned"},
             "stoch_ok"         : {"points": 2, "desc": "Stochastic (5,3,3) crossover di zone"},
             "volume_ok"        : {"points": 1, "desc": "Volume di atas rata-rata"},
-            "candle_ok"        : {"points": 1, "desc": "Candle pattern konfirmasi"},
+            "candle_ok"        : {"points": 2, "desc": "Candle pattern konfirmasi (v3.0: TERVALIDASI out-of-sample, naik 1->2)"},
             # Breakout & Pullback
             "breakout_ok"      : {"points": 2, "desc": "Breakout valid dengan volume"},
             "pullback_ok"      : {"points": 1, "desc": "Pullback ke zona support/resistance"},
             # SMC
-            "bos_confirmed"    : {"points": 2, "desc": "BOS/CHoCH fresh terkonfirmasi"},
-            "ob_valid"         : {"points": 2, "desc": "Order Block valid"},
-            "fvg_detected"     : {"points": 1, "desc": "FVG terdeteksi"},
-            "liquidity_swept"  : {"points": 1, "desc": "Liquidity sudah di-sweep"},
-            "premium_discount" : {"points": 1, "desc": "Di area Premium/Discount"},
+            "bos_confirmed"    : {"points": 2, "desc": "BOS/CHoCH fresh terkonfirmasi (v3.0: TERVALIDASI out-of-sample, naik 1->2)"},
+            "ob_valid"         : {"points": 1, "desc": "Order Block valid (REDESIGN: 2->1, ExpGap -0.220R)"},
+            "fvg_detected"     : {"points": 0, "desc": "FVG terdeteksi (REDESIGN: 1->0, ExpGap -0.195R -- info only)"},
+            "liquidity_swept"  : {"points": 1, "desc": "Liquidity sudah di-sweep (v3.0: GAGAL VALIDASI out-of-sample, turun dari 3 balik ke 1 -- boost sebelumnya salah)"},
+            "premium_discount" : {"points": 0, "desc": "Di area Premium/Discount (REDESIGN: 1->0, ExpGap -0.253R -- info only)"},
             # Fibonacci
-            "fib_618"          : {"points": 2, "desc": "Fibonacci 0.618 confluence"},
-            "fib_50"           : {"points": 1, "desc": "Fibonacci 0.500 confluence"},
+            "fib_618"          : {"points": 0, "desc": "Fibonacci 0.618 confluence (REDESIGN: 2->0, ExpGap -0.488R!! -- info only)"},
+            "fib_50"           : {"points": 2, "desc": "Fibonacci 0.500 confluence (REDESIGN: 1->2, ExpGap +0.390R)"},
             # Institutional
             "vwap_ok"          : {"points": 2, "desc": "VWAP zone sesuai direction"},
             "funding_ok"       : {"points": 1, "desc": "Funding rate kondusif"},
-            "correlation_ok"   : {"points": 1, "desc": "BTC correlation searah"},
+            "correlation_ok"   : {"points": 1, "desc": "BTC correlation searah (v2.1: DIBATALKAN dari 2, balik ke 1 -- ExpGap kebalik arah di ronde 2)"},
             # Filter
             "killzone_ok"      : {"points": 1, "desc": "Dalam Killzone session"},
             "news_clear"       : {"points": 1, "desc": "Tidak ada high-impact news"},
@@ -78,7 +86,7 @@ class ConfluenceScorer:
 
         self.max_score = sum(
             v["points"] for v in self.score_definitions.values()
-        )  # = 24
+        )  # = 21 (v3.0, lihat REDESIGN v3.0 di atas)
 
     # ─── CALCULATE SCORE ────────────────────
 
@@ -94,7 +102,7 @@ class ConfluenceScorer:
                   vwap_result        : dict = None,
                   funding_result     : dict = None,
                   correlation_result : dict = None) -> dict:
-        """Hitung confluence score 24 poin."""
+        """Hitung confluence score (max 21, lihat REDESIGN v3.0 di atas)."""
         try:
             score     = 0
             breakdown = {}
@@ -179,7 +187,7 @@ class ConfluenceScorer:
                 breakdown["volume_ok"] = 0
                 reasons.append(f"❌ Volume {vol_ratio:.1f}x lemah")
 
-            # 4. Candle Pattern (1 poin)
+            # 4. Candle Pattern (REDESIGN: 2 poin, dari 1)
             candle_dir = indicators.get("candle_direction")
             candle_det = indicators.get("candle_detected", False)
             candle_ok  = candle_det and candle_dir == direction
@@ -199,7 +207,7 @@ class ConfluenceScorer:
             # BREAKOUT & PULLBACK
             # ══════════════════════════════════
 
-            # 5. Breakout (maks 2 poin)
+            # 5. Breakout (maks 2 poin) -- TIDAK DIUBAH, data belum cukup
             bo_valid  = breakout_info.get("valid", False)
             bo_dir    = breakout_info.get("direction")
             bo_volume = breakout_info.get("volume_confirmed", False)
@@ -221,7 +229,7 @@ class ConfluenceScorer:
                 breakdown["breakout_ok"] = 0
                 reasons.append("❌ Tidak ada breakout valid")
 
-            # 6. Pullback (1 poin)
+            # 6. Pullback (1 poin) -- TIDAK DIUBAH, sample belum reliable
             pb_valid = pullback_info.get("valid", False)
             pb_dir   = pullback_info.get("direction")
             pb_depth = pullback_info.get("depth_pct", 0)
@@ -242,7 +250,7 @@ class ConfluenceScorer:
             # SMC
             # ══════════════════════════════════
 
-            # 7. BOS / CHoCH (2 poin fresh, 1 poin stale)
+            # 7. BOS / CHoCH (REDESIGN: maks 1 poin fresh, dari 2; stale tetap dianggap 0)
             bos_4h         = smc_analysis.get("bos_4h",         False)
             choch_4h       = smc_analysis.get("choch_4h",       False)
             bos_1h         = smc_analysis.get("bos_1h",         False)
@@ -259,7 +267,6 @@ class ConfluenceScorer:
             )
 
             if bos_ok and bos_fresh:
-                # BOS fresh → full 2 poin
                 pts = self.score_definitions["bos_confirmed"]["points"]
                 score += pts
                 breakdown["bos_confirmed"] = pts
@@ -271,17 +278,15 @@ class ConfluenceScorer:
                 )
                 reasons.append(f"✅ {bos_type} FRESH terkonfirmasi")
             elif bos_ok and not bos_fresh:
-                # BOS stale → 1 poin
-                score += 1
-                breakdown["bos_confirmed"] = 1
+                breakdown["bos_confirmed"] = 0
                 reasons.append(
-                    "⚠️ BOS/CHoCH stale (>10 candle) — 1 poin"
+                    "⚠️ BOS/CHoCH stale (>10 candle) — 0 poin (REDESIGN)"
                 )
             else:
                 breakdown["bos_confirmed"] = 0
                 reasons.append("❌ BOS/CHoCH tidak terkonfirmasi")
 
-            # 8. Order Block (2 poin)
+            # 8. Order Block (REDESIGN: 1 poin, dari 2)
             in_ob   = smc_analysis.get("in_ob", False)
             ob_type = smc_analysis.get("ob_type", "")
             if in_ob:
@@ -293,19 +298,19 @@ class ConfluenceScorer:
                 breakdown["ob_valid"] = 0
                 reasons.append("❌ Harga tidak di Order Block")
 
-            # 9. FVG (1 poin)
+            # 9. FVG (REDESIGN: 0 poin, dari 1 -- info only, tetap dicatat di reasons)
             in_fvg   = smc_analysis.get("in_fvg", False)
             fvg_type = smc_analysis.get("fvg_type", "")
             if in_fvg:
                 pts = self.score_definitions["fvg_detected"]["points"]
                 score += pts
                 breakdown["fvg_detected"] = pts
-                reasons.append(f"✅ {fvg_type} terdeteksi")
+                reasons.append(f"ℹ️ {fvg_type} terdeteksi (0 poin — REDESIGN, info only)")
             else:
                 breakdown["fvg_detected"] = 0
                 reasons.append("❌ Tidak ada FVG")
 
-            # 10. Liquidity Swept (1 poin)
+            # 10. Liquidity Swept (v3.0: 1 poin, turun dari 3 -- GAGAL VALIDASI out-of-sample)
             liq_swept = smc_analysis.get("liquidity_swept", False)
             if liq_swept:
                 pts = self.score_definitions["liquidity_swept"]["points"]
@@ -313,13 +318,13 @@ class ConfluenceScorer:
                 breakdown["liquidity_swept"] = pts
                 liq_type = "SSL" if direction == "BUY" else "BSL"
                 reasons.append(
-                    f"✅ {liq_type} swept → smart money aktif"
+                    f"✅ {liq_type} swept → smart money aktif ({pts} poin)"
                 )
             else:
                 breakdown["liquidity_swept"] = 0
                 reasons.append("❌ Liquidity belum di-sweep")
 
-            # 11. Premium / Discount (1 poin)
+            # 11. Premium / Discount (REDESIGN: 0 poin, dari 1 -- info only)
             ideal_zone = smc_analysis.get("ideal_zone", False)
             if ideal_zone:
                 pts = self.score_definitions["premium_discount"]["points"]
@@ -328,7 +333,7 @@ class ConfluenceScorer:
                 pd_data   = smc_analysis.get("premium_discount", {})
                 zone_name = pd_data.get("zone", "")
                 reasons.append(
-                    f"✅ Harga di {zone_name} Zone — ideal entry"
+                    f"ℹ️ Harga di {zone_name} Zone (0 poin — REDESIGN, info only)"
                 )
             else:
                 breakdown["premium_discount"] = 0
@@ -338,7 +343,7 @@ class ConfluenceScorer:
             # FIBONACCI
             # ══════════════════════════════════
 
-            # 12. Fib 0.618 (2 poin)
+            # 12. Fib 0.618 (REDESIGN: 0 poin, dari 2 -- ExpGap -0.488R, info only)
             fib_level = fib_analysis.get("fib_level", "")
             fib_at    = fib_analysis.get("at_fib", False)
 
@@ -347,17 +352,17 @@ class ConfluenceScorer:
                 score += pts
                 breakdown["fib_618"] = pts
                 reasons.append(
-                    "✅ Fibonacci 0.618 (Golden Ratio) — level terkuat!"
+                    "ℹ️ Fibonacci 0.618 (0 poin — REDESIGN, data historis nunjukin ini justru merugi)"
                 )
             else:
                 breakdown["fib_618"] = 0
 
-            # 13. Fib 0.500 (1 poin)
+            # 13. Fib 0.500 (REDESIGN: 2 poin, dari 1)
             if fib_at and fib_level == "0.500":
                 pts = self.score_definitions["fib_50"]["points"]
                 score += pts
                 breakdown["fib_50"] = pts
-                reasons.append("✅ Fibonacci 0.500 — midpoint")
+                reasons.append("✅ Fibonacci 0.500 — midpoint (REDESIGN: naik jadi 2 poin)")
             else:
                 breakdown["fib_50"] = 0
 
@@ -370,7 +375,7 @@ class ConfluenceScorer:
             # INSTITUTIONAL
             # ══════════════════════════════════
 
-            # 14. VWAP Zone (maks 2 poin)
+            # 14. VWAP Zone (maks 2 poin) -- TIDAK DIUBAH
             vwap_bonus  = vwap_result.get("score_bonus", 0)
             vwap_pass   = vwap_result.get("pass", True)
             vwap_reason = vwap_result.get("reason", "")
@@ -391,7 +396,7 @@ class ConfluenceScorer:
                 else:
                     reasons.append("❌ VWAP zone tidak ideal")
 
-            # 15. Funding Rate (1 poin)
+            # 15. Funding Rate (1 poin) -- TIDAK DIUBAH, tidak bisa dibacktest historis
             fund_bonus  = funding_result.get("score_bonus", 0)
             fund_pass   = funding_result.get("pass", True)
             fund_reason = funding_result.get("reason", "")
@@ -412,7 +417,7 @@ class ConfluenceScorer:
                     f"❌ Funding rate tidak kondusif ({fund_rate:+.4f}%)"
                 )
 
-            # 16. BTC Correlation (1 poin)
+            # 16. BTC Correlation (REDESIGN: 2 poin, dari 1)
             corr_bonus  = correlation_result.get("score_bonus", 0)
             corr_pass   = correlation_result.get("pass", True)
             corr_reason = correlation_result.get("reason", "")
@@ -420,7 +425,6 @@ class ConfluenceScorer:
             is_btc_pair = correlation_result.get("is_btc_pair", False)
 
             if is_btc_pair:
-                # BTC pair tidak perlu cek correlation diri sendiri
                 breakdown["correlation_ok"] = 0
             elif corr_bonus >= 1:
                 pts = self.score_definitions["correlation_ok"]["points"]
@@ -441,7 +445,7 @@ class ConfluenceScorer:
             # FILTER
             # ══════════════════════════════════
 
-            # 17. Killzone (1 poin)
+            # 17. Killzone (1 poin) -- TIDAK DIUBAH
             in_kz        = session_info.get("in_killzone", False)
             session_name = session_info.get("session_name", "")
             avoid        = session_info.get("should_avoid", False)
@@ -467,7 +471,7 @@ class ConfluenceScorer:
                         f"next: {next_s.get('name', 'N/A')}"
                     )
 
-            # 18. News Clear (1 poin)
+            # 18. News Clear (1 poin) -- TIDAK DIUBAH
             is_safe   = news_status.get("is_safe", True)
             news_list = news_status.get("unsafe_news", [])
             if is_safe:
@@ -575,16 +579,16 @@ class ConfluenceScorer:
 
     @staticmethod
     def _get_grade(score: int) -> str:
-        """Grade berbasis max 24 poin"""
-        if score >= 21:
+        """Grade berbasis max 21 poin (v2.1, dulu 24 original / 23 di v2.0)"""
+        if score >= 18:
             return "A+ (Perfect Setup)"
-        elif score >= 18:
-            return "A  (Excellent)"
         elif score >= 15:
+            return "A  (Excellent)"
+        elif score >= 13:
             return "B+ (Good)"
-        elif score >= 11:
+        elif score >= 9:
             return "B  (Average)"
-        elif score >= 8:
+        elif score >= 6:
             return "C  (Weak)"
         else:
             return "F  (Skip)"
@@ -593,7 +597,7 @@ class ConfluenceScorer:
 
     def get_summary(self, result: dict) -> str:
         score     = result.get("score", 0)
-        max_score = result.get("max_score", 24)
+        max_score = result.get("max_score", 21)
         grade     = result.get("grade", "F")
         direction = result.get("direction", "")
         is_valid  = result.get("is_valid", False)
@@ -636,7 +640,7 @@ class ConfluenceScorer:
         lines.extend(reasons)
 
         if not is_valid and not hard_fail:
-            missing = result.get("min_required", 11) - score
+            missing = result.get("min_required", 10) - score
             lines.append(
                 f"\n⚠️ Kurang {missing} poin untuk entry."
             )

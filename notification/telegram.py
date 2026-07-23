@@ -1,6 +1,24 @@
 # ============================================
 # VORTEX BOT - TELEGRAM NOTIFICATION SYSTEM
 # ============================================
+# FIX v1.4 (sync dengan confluence.py v3.0 & main.py v1.4):
+#   - Semua tempat yang hardcode "/24" diganti jadi dinamis,
+#     ambil dari confluence_scorer.max_score. Sebelumnya banyak
+#     pesan Telegram (signal, trade opened/closed, health check,
+#     morning briefing, /score) masih nunjukin "/24" padahal
+#     confluence.py v3.0 total skornya udah 21 -- bakal makin
+#     nyasar lagi kalau bobot diubah lagi ke depannya kalau tetap
+#     hardcode.
+#   - Command /score SEKARANG ambil breakdown poin LANGSUNG dari
+#     confluence_scorer.score_definitions (bukan teks hardcode
+#     yang gampang basi). Otomatis selalu akurat walau bobot
+#     komponen di confluence.py diubah lagi nanti.
+#   - Teks yang nyiratin Killzone & VWAP sebagai "filter" (hard
+#     block) diupdate -- dua-duanya sekarang SOFT-SCORE (lihat
+#     main.py v1.4 & vwap.py v2.0), bukan hard gate lagi.
+#   - Version string disamain ke v1.4 (sebelumnya "v1.1" tertinggal
+#     di banyak tempat padahal main.py sudah v1.4).
+# ============================================
 
 import time
 import requests
@@ -8,8 +26,10 @@ import threading
 from datetime import datetime, timezone, timedelta
 from config import cfg
 from logger import logger
+from strategy.confluence import confluence_scorer
 
 WIB = timezone(timedelta(hours=7))
+BOT_VERSION = "1.4"
 
 def _wib_now() -> datetime:
     return datetime.now(WIB)
@@ -233,7 +253,7 @@ class TelegramNotifier:
 
             if cmd in ("/start", "/help"):
                 return (
-                    f"🤖 <b>VΦrtex Bot v1.1 Commands</b>\n"
+                    f"🤖 <b>VΦrtex Bot v{BOT_VERSION} Commands</b>\n"
                     f"{'='*32}\n"
                     f"/status   — Status bot\n"
                     f"/balance  — Cek saldo\n"
@@ -389,60 +409,51 @@ class TelegramNotifier:
                 )
 
             elif cmd == "/score":
-                # ── UPDATED: max score 24 ──
-                min_s  = cfg.MIN_CONFLUENCE_SCORE
-                max_s  = 24
-                phases = (
-                    f"  Demo P1 : 10/{max_s}\n"
-                    f"  Demo P2 : 13/{max_s}\n"
-                    f"  Live    : 16/{max_s}"
-                )
+                # FIX v1.4: breakdown SEKARANG diambil langsung dari
+                # confluence_scorer.score_definitions -- otomatis akurat
+                # walau bobot komponen di confluence.py diubah lagi nanti.
+                # Sebelumnya ini teks hardcode yang gampang basi (sempat
+                # masih nunjukin skala /24 padahal sudah pindah ke /21).
+                min_s = cfg.MIN_CONFLUENCE_SCORE
+                max_s = confluence_scorer.max_score
+
+                breakdown_lines = ""
+                for name, info in confluence_scorer.score_definitions.items():
+                    pts   = info.get("points", 0)
+                    label = name.replace("_", " ").title()
+                    breakdown_lines += f"  {label:<16}: {pts}\n"
+
                 return (
                     f"🎯 <b>CONFLUENCE SCORE</b>\n"
                     f"{'='*32}\n"
                     f"Min sekarang : <b>{min_s}/{max_s}</b>\n"
                     f"{'='*32}\n"
-                    f"<b>Phase guide:</b>\n"
-                    f"{phases}\n"
+                    f"<b>Breakdown {max_s} poin (live dari kode):</b>\n"
+                    f"{breakdown_lines}"
                     f"{'='*32}\n"
-                    f"<b>Breakdown {max_s} poin:</b>\n"
-                    f"  EMA align    : 1\n"
-                    f"  Stoch(5,3,3) : 2\n"
-                    f"  Volume       : 1\n"
-                    f"  Candle       : 1\n"
-                    f"  Breakout     : 2\n"
-                    f"  Pullback     : 1\n"
-                    f"  BOS/CHoCH    : 2\n"
-                    f"  Order Block  : 2\n"
-                    f"  FVG          : 1\n"
-                    f"  Liquidity    : 1\n"
-                    f"  Premium/Disc : 1\n"
-                    f"  Fib 0.618    : 2\n"
-                    f"  Fib 0.500    : 1\n"
-                    f"  Killzone     : 1\n"
-                    f"  News clear   : 1\n"
-                    f"  [+1 upgrade] : 1\n"
-                    f"{'='*32}\n"
-                    f"Ubah di Railway: MIN_CONFLUENCE_SCORE=15"
+                    f"ℹ️ Killzone & VWAP: soft-score (bukan hard block)\n"
+                    f"Ubah threshold di Railway: MIN_CONFLUENCE_SCORE=..."
                 )
 
             elif cmd == "/strategy":
                 return (
-                    f"📐 <b>STRATEGI AKTIF</b>\n"
+                    f"📐 <b>STRATEGI AKTIF (v{BOT_VERSION})</b>\n"
                     f"{'='*32}\n"
                     f"<b>Core:</b>\n"
                     f"  • SMC (BOS/CHoCH/OB/FVG)\n"
-                    f"  • Fibonacci (0.618 Golden Ratio)\n"
+                    f"  • Fibonacci (0.500 & 0.618)\n"
                     f"  • Multi-TF (4H/1H/15M)\n"
                     f"<b>Entry Filter:</b>\n"
                     f"  • Stochastic (5,3,3)\n"
                     f"  • EMA 13/21\n"
                     f"  • Breakout + Retest\n"
                     f"  • Pullback ke OB/FVG/Fib\n"
-                    f"<b>Institutional:</b>\n"
-                    f"  • VWAP filter\n"
-                    f"  • Funding Rate filter\n"
-                    f"  • Killzone (London/NY)\n"
+                    f"<b>Institutional (soft-score, bukan hard block):</b>\n"
+                    f"  • VWAP zone\n"
+                    f"  • Killzone (London/NY) — analisis tetap 24 jam\n"
+                    f"<b>Hard filter (masih block kalau ekstrem):</b>\n"
+                    f"  • Funding Rate\n"
+                    f"  • BTC Correlation (counter-market kuat)\n"
                     f"<b>Risk:</b>\n"
                     f"  • SL: 2.0x ATR dynamic\n"
                     f"  • Partial TP (30/40/30%)\n"
@@ -456,7 +467,7 @@ class TelegramNotifier:
                 try:
                     from filters.news_filter import session_filter
                     info = session_filter.get_session_info()
-                    kz   = "✅ YA" if info.get("in_killzone") else "❌ Tidak"
+                    kz   = "✅ YA" if info.get("in_killzone") else "❌ Tidak (tetap dianalisis)"
                     return (
                         f"🕐 <b>SESSION INFO</b>\n"
                         f"{'='*32}\n"
@@ -464,8 +475,10 @@ class TelegramNotifier:
                         f"Session  : {info.get('active_session')}\n"
                         f"Killzone : {kz}\n"
                         f"{'='*32}\n"
-                        f"<b>Jadwal Killzone:</b>\n"
-                        f"  London : 15:00–17:30 WIB\n"
+                        f"ℹ️ Killzone sekarang cuma soft-score (v1.4),\n"
+                        f"analisis tetap jalan 24 jam.\n"
+                        f"<b>Jadwal Killzone (nilai skor lebih tinggi):</b>\n"
+                        f"  London : 15:00–18:30 WIB\n"
                         f"  NY     : 20:30–23:00 WIB\n"
                         f"⏰ {_wib_str()}"
                     )
@@ -519,11 +532,12 @@ class TelegramNotifier:
         else:
             exc = "Bybit Testnet" if cfg.IS_TESTNET else "Bybit Live"
 
-        vwap_str    = "✅ ON" if cfg.VWAP_ENABLED else "❌ OFF"
-        funding_str = "✅ ON" if cfg.FUNDING_RATE_ENABLED else "❌ OFF"
+        vwap_str   = "✅ ON (soft-score)" if cfg.VWAP_ENABLED else "❌ OFF"
+        funding_str = "✅ ON (hard filter)" if cfg.FUNDING_RATE_ENABLED else "❌ OFF"
+        max_score  = confluence_scorer.max_score
 
         msg = (
-            f"🚀 <b>VΦrtex Bot v1.1 STARTED!</b>\n"
+            f"🚀 <b>VΦrtex Bot v{BOT_VERSION} STARTED!</b>\n"
             f"{'='*35}\n"
             f"💰 Balance   : <b>${balance:.4f}</b>\n"
             f"📊 Mode      : <b>{self._get_mode(balance)}</b>\n"
@@ -535,8 +549,8 @@ class TelegramNotifier:
             f"  Breakout/Pullback + ATR 2.0x SL\n"
             f"  VWAP: {vwap_str} | Funding: {funding_str}\n"
             f"{'='*35}\n"
-            f"🎯 Min Score : <b>{cfg.MIN_CONFLUENCE_SCORE}/24</b>\n"
-            f"⏰ Killzone  : London & New York\n"
+            f"🎯 Min Score : <b>{cfg.MIN_CONFLUENCE_SCORE}/{max_score}</b>\n"
+            f"⏰ Killzone  : soft-score, analisis jalan 24 jam\n"
             f"{'='*35}\n"
             f"🤖 Bot monitoring market...\n"
             f"📱 /help untuk commands\n"
@@ -599,7 +613,7 @@ class TelegramNotifier:
                     f"Jam    : <b>{wib_time}</b>\n"
                     f"Durasi : ±{dur_str}\n"
                     f"{'='*35}\n"
-                    f"🎯 Bot mulai hunting setup...\n"
+                    f"🎯 Soft-score naik selama killzone...\n"
                     f"⏰ {_wib_str()}"
                 )
             elif event == "ended":
@@ -608,7 +622,7 @@ class TelegramNotifier:
                     f"{'='*35}\n"
                     f"Jam    : <b>{wib_time}</b>\n"
                     f"{'='*35}\n"
-                    f"😴 Bot kembali standby...\n"
+                    f"🤖 Bot tetap analisis (soft-score)...\n"
                     f"⏰ {_wib_str()}"
                 )
             else:
@@ -628,6 +642,7 @@ class TelegramNotifier:
         pair      = signal.get("pair", "")
         direction = signal.get("direction", "")
         score     = signal.get("confluence_score", 0)
+        max_score = signal.get("max_score", confluence_scorer.max_score)
         grade     = signal.get("grade", "")
         session   = signal.get("session", "")
         fib       = signal.get("fib_level", "N/A")
@@ -669,6 +684,8 @@ class TelegramNotifier:
                 f"Funding  : {f_emoji} {funding_rate:+.4f}%\n"
             )
 
+        killzone_flag = "✅ Killzone" if signal.get("in_killzone") else "ℹ️ Di luar killzone"
+
         reasons      = signal.get("top_reasons", [])
         reasons_text = ""
         ok_reasons   = [r for r in reasons if "✅" in str(r)]
@@ -680,8 +697,8 @@ class TelegramNotifier:
             f"{'='*35}\n"
             f"📊 <b>{pair}</b> — {dir_emoji}\n"
             f"{'='*35}\n"
-            f"Score    : <b>{score}/24 ({grade})</b>\n"
-            f"Session  : <b>{session}</b>\n"
+            f"Score    : <b>{score}/{max_score} ({grade})</b>\n"
+            f"Session  : <b>{session}</b> ({killzone_flag})\n"
             f"Mode     : <b>{bp_str}</b>\n"
             f"Fib      : <b>{fib}</b>\n"
             f"Stoch    : {zone_emoji} %K={stoch_k:.1f} "
@@ -710,6 +727,7 @@ class TelegramNotifier:
         size      = trade.get("position_usdt", 0)
         lev       = trade.get("leverage", 1)
         score     = trade.get("confluence_score", 0)
+        max_score = trade.get("max_score", confluence_scorer.max_score)
         risk_amt  = trade.get("risk_amount", 0)
         mode      = trade.get("mode", "")
         bp_mode   = trade.get("bp_mode", "NONE")
@@ -744,7 +762,7 @@ class TelegramNotifier:
             f"⚙️ Lev   : <b>{lev}x</b>\n"
             f"⚠️ Risk  : <b>${risk_amt:.4f}</b>\n"
             f"📊 RR    : <b>1:{rr2:.1f}</b>\n"
-            f"🏆 Score : <b>{score}/24</b>\n"
+            f"🏆 Score : <b>{score}/{max_score}</b>\n"
             f"💼 Mode  : <b>{mode}</b>\n"
             f"{'='*35}\n"
             f"⏰ {_wib_str()}"
@@ -763,6 +781,7 @@ class TelegramNotifier:
         duration  = close_data.get("duration_minutes", 0)
         balance   = close_data.get("new_balance", 0)
         score     = trade.get("confluence_score", 0)
+        max_score = trade.get("max_score", confluence_scorer.max_score)
         bp_mode   = trade.get("bp_mode", "NONE")
 
         hours  = duration // 60
@@ -797,7 +816,7 @@ class TelegramNotifier:
             f"💰 PnL     : <b>{sign}${pnl:.4f}</b>\n"
             f"📊 RR      : <b>1:{rr:.2f}</b>\n"
             f"⏱️ Durasi : <b>{hours}j {mins}m</b>\n"
-            f"🏆 Score  : {score}/24\n"
+            f"🏆 Score  : {score}/{max_score}\n"
             f"{'='*35}\n"
             f"💼 Balance : <b>${balance:.4f}</b>\n"
             f"⏰ {_wib_str()}"
@@ -829,6 +848,9 @@ class TelegramNotifier:
                                vwap_side: str,
                                price: float,
                                vwap: float):
+        # CATATAN v1.4: VWAP sekarang soft-score (lihat vwap.py v2.0),
+        # fungsi ini dipertahankan untuk kompatibilitas tapi jarang
+        # ke-trigger lagi karena VWAP sudah tidak hard block sinyal.
         side_str = "di atas" if vwap_side == "above" else "di bawah"
         issue    = (
             "SELL di discount zone"
@@ -836,7 +858,7 @@ class TelegramNotifier:
             else "BUY di premium zone"
         )
         msg = (
-            f"⚠️ <b>VWAP FILTER — SKIP</b>\n"
+            f"⚠️ <b>VWAP — CATATAN</b>\n"
             f"{'='*35}\n"
             f"Pair    : {pair}\n"
             f"Dir     : {direction}\n"
@@ -845,7 +867,7 @@ class TelegramNotifier:
             f"VWAP    : ${vwap:,.4f}\n"
             f"Posisi  : {side_str} VWAP\n"
             f"{'='*35}\n"
-            f"Setup valid tapi zona salah.\n"
+            f"ℹ️ VWAP soft-score, ini cuma info bukan block.\n"
             f"⏰ {_wib_str()}"
         )
         self.send(msg)
@@ -941,8 +963,9 @@ class TelegramNotifier:
         }
         regime_text = regime_map.get(market_regime, "❓ Unknown")
 
-        vwap_str    = "✅ ON" if cfg.VWAP_ENABLED else "❌ OFF"
-        funding_str = "✅ ON" if cfg.FUNDING_RATE_ENABLED else "❌ OFF"
+        vwap_str    = "✅ ON (soft-score)" if cfg.VWAP_ENABLED else "❌ OFF"
+        funding_str = "✅ ON (hard filter)" if cfg.FUNDING_RATE_ENABLED else "❌ OFF"
+        max_score   = confluence_scorer.max_score
 
         msg = (
             f"☀️ <b>SELAMAT PAGI — VΦrtex Bot</b>\n"
@@ -952,14 +975,14 @@ class TelegramNotifier:
             f"{'='*35}\n"
             f"💰 Balance  : <b>${balance:.4f}</b>\n"
             f"🌍 Market   : <b>{regime_text}</b>\n"
-            f"🎯 Min Score: <b>{cfg.MIN_CONFLUENCE_SCORE}/24</b>\n"
+            f"🎯 Min Score: <b>{cfg.MIN_CONFLUENCE_SCORE}/{max_score}</b>\n"
             f"VWAP Filter : {vwap_str}\n"
             f"Funding Flt : {funding_str}\n"
             f"{news_text}"
             f"{'='*35}\n"
-            f"<b>Killzone Hari Ini:</b>\n"
+            f"<b>Killzone Hari Ini (soft-score, bot tetap 24 jam):</b>\n"
             f"  🟡 Pre-London : 14:45 WIB\n"
-            f"  🟢 London     : 15:00–17:30 WIB\n"
+            f"  🟢 London     : 15:00–18:30 WIB\n"
             f"  🟡 Pre-NY     : 20:15 WIB\n"
             f"  🟢 New York   : 20:30–23:00 WIB\n"
             f"{'='*35}\n"
@@ -1027,6 +1050,7 @@ class TelegramNotifier:
     def send_health_check(self, uptime: float,
                            balance: float,
                            open_trades: int):
+        max_score = confluence_scorer.max_score
         msg = (
             f"💚 <b>BOT HEALTH CHECK</b>\n"
             f"{'='*35}\n"
@@ -1034,7 +1058,7 @@ class TelegramNotifier:
             f"⏱️ Uptime : <b>{uptime:.1f} jam</b>\n"
             f"💰 Balance : <b>${balance:.4f}</b>\n"
             f"📊 Open    : <b>{open_trades} trade(s)</b>\n"
-            f"🎯 Score   : min {cfg.MIN_CONFLUENCE_SCORE}/24\n"
+            f"🎯 Score   : min {cfg.MIN_CONFLUENCE_SCORE}/{max_score}\n"
             f"{'='*35}\n"
             f"🤖 Semua sistem normal!\n"
             f"⏰ {_wib_str()}"
@@ -1044,7 +1068,7 @@ class TelegramNotifier:
     def test_connection(self) -> bool:
         try:
             return self.send(
-                f"🔧 <b>VΦrtex Bot v1.1 — Connected!</b>\n"
+                f"🔧 <b>VΦrtex Bot v{BOT_VERSION} — Connected!</b>\n"
                 f"✅ Telegram OK\n"
                 f"📱 /help untuk commands\n"
                 f"⏰ {_wib_str()}"

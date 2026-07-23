@@ -1,27 +1,44 @@
 # ============================================
-# VORTEX BOT v1.3c - MAIN ENGINE
-# FIX v1.3c:
-#   - BUG FIX: Regime cache expired (6 jam) tapi cuma
-#     di-refresh sekali sehari lewat morning_briefing
-#     (00:00 WIB). Akibatnya ±18 jam/hari get_cached_regime()
-#     jatuh ke UNKNOWN -> regime_score_boost() diam-diam +1
-#     -> threshold efektif naik dari 15 jadi 16 tanpa disadari.
-#     FIX: tambah scheduled job _refresh_regime() tiap 5 jam,
-#     supaya cache regime selalu fresh dan boost cuma aktif
-#     kalau regime BENERAN ranging/high-vol/unknown, bukan
-#     gara-gara cache basi.
+# VORTEX BOT v1.4 - MAIN ENGINE
+# FIX v1.4:
+#   - KILLZONE JADI SOFT-SCORE, BUKAN HARD GATE LAGI.
+#     backtest_killzone_test.py (train/test split validation)
+#     nunjukin killzone filter justru MERUGIKAN secara konsisten:
+#       Train: killzone -0.273R vs non-killzone +0.266R
+#       Test : killzone -0.269R vs non-killzone -0.079R
+#     Killzone negatif di KEDUA set -- non-killzone konsisten
+#     lebih baik. analyze_pair() SEBELUMNYA nge-return {} kalau
+#     di luar killzone (skip total, gak sempat dianalisis).
+#     SEKARANG: analisis tetap jalan 24 jam, killzone cuma jadi
+#     1 komponen soft-score di confluence.py (killzone_ok, 1 poin)
+#     -- sama persis kayak VWAP yang sebelumnya juga diubah dari
+#     hard block jadi soft score.
+#     Delay window (15 mnt London / 5 mnt NY) di execute_trade()
+#     TETAP dipertahankan -- itu proteksi beda (nunggu spread
+#     stabil pas awal sesi), gak diuji sama backtest killzone
+#     kemarin, jadi belum ada alasan buat dihapus.
+#
+#   - FIX kosmetik: banyak log/pesan sebelumnya hardcode teks
+#     "/24" padahal confluence.py v3.0 total skornya udah 21
+#     (bahkan bisa berubah lagi ke depannya). Sekarang semua
+#     tempat itu ambil angka asli dari confluence_scorer.max_score
+#     supaya otomatis akurat walau bobot komponen diubah lagi.
+# ============================================
+# FIX v1.3c (dipertahankan):
+#   - Regime cache expired (6 jam) tapi cuma di-refresh sekali
+#     sehari lewat morning_briefing (00:00 WIB) -> ±18 jam/hari
+#     jatuh ke UNKNOWN -> boost +1 diam-diam. FIX: refresh tiap
+#     5 jam lewat scheduled job _refresh_regime().
 # ============================================
 # FIX v1.3b (dipertahankan):
-#   - Regime di-detect saat startup() supaya tidak
-#     UNKNOWN setelah redeploy. Sebelumnya hanya
-#     refresh di morning_briefing jam 00:00 WIB.
-#   - analyze_pair() tidak lagi terganggu oleh
-#     in_delay dari get_session_info() — delay
-#     sudah dipisah dari should_avoid di news_filter.
-#   - Log Regime di scan done sekarang akurat.
+#   - Regime di-detect saat startup() supaya tidak UNKNOWN
+#     setelah redeploy.
+#   - analyze_pair() tidak lagi terganggu oleh in_delay dari
+#     get_session_info() — delay sudah dipisah dari should_avoid
+#     di news_filter.
 # UPDATE:
-#   - Mini App API server (FastAPI) jalan di thread
-#     terpisah di port 8080, tidak ganggu bot loop.
+#   - Mini App API server (FastAPI) jalan di thread terpisah
+#     di port 8080, tidak ganggu bot loop.
 # ============================================
 
 import time
@@ -87,7 +104,7 @@ class VortexBot:
 
     def __init__(self):
         self.name        = "VΦrtex Bot"
-        self.version     = "1.3c"
+        self.version     = "1.4"
         self.running     = False
         self.start_time  = None
         self.pairs       = cfg.PAIRS
@@ -161,8 +178,9 @@ class VortexBot:
         self.running    = True
         self.start_time = now_utc()
 
-        cap_mode = cfg.get_capital_mode(balance)
-        regime_d = risk_manager.get_cached_regime()
+        cap_mode   = cfg.get_capital_mode(balance)
+        regime_d   = risk_manager.get_cached_regime()
+        max_score  = confluence_scorer.max_score
         logger.info(
             f"✅ {self.name} v{self.version} started!\n"
             f"   Exchange : {EXCHANGE_NAME}\n"
@@ -171,12 +189,13 @@ class VortexBot:
             f"   Pairs    : {', '.join(self.pairs)}\n"
             f"   Strategy : SMC+Stoch+BP+VWAP+Funding+Corr\n"
             f"   SL       : 2.0x ATR Dynamic\n"
-            f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/24\n"
+            f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/{max_score}\n"
             f"   Regime   : {regime_d.get('emoji','')} "
             f"{regime_d.get('regime','?')} "
             f"+{risk_manager.get_regime_score_boost()}\n"
-            f"   VWAP     : {'ON' if cfg.VWAP_ENABLED else 'OFF'}\n"
+            f"   VWAP     : {'ON' if cfg.VWAP_ENABLED else 'OFF'} (soft-score)\n"
             f"   Funding  : {'ON' if cfg.FUNDING_RATE_ENABLED else 'OFF'}\n"
+            f"   Killzone : soft-score (v1.4, bukan hard gate lagi)\n"
             f"   London delay : 15 mnt | NY delay : 5 mnt\n"
             f"   Time WIB : {wib_str()}\n"
             f"   Time UTC : {utc_str()}"
@@ -204,19 +223,8 @@ class VortexBot:
     def _refresh_regime(self, context: str = "scheduled"):
         """
         Refresh market regime cache.
-
-        FIX v1.3c: sebelumnya HANYA dipanggil di startup() dan
-        _morning_briefing() (jam 00:00 WIB). Karena cache regime
-        expired setelah 6 jam (lihat risk/management.py
-        get_cached_regime), selama ±18 jam/hari cache jatuh ke
-        UNKNOWN dan get_regime_score_boost() diam-diam nambah +1
-        ke threshold efektif — padahal regime aslinya belum tentu
-        beneran "unknown".
-
-        Dipanggil dari 3 tempat sekarang:
-          1. startup()              -> supaya tidak UNKNOWN abis redeploy
-          2. schedule tiap 5 jam     -> supaya cache tidak pernah expired
-          3. _morning_briefing()    -> tetap ada untuk laporan pagi
+        Dipanggil dari 3 tempat: startup(), schedule tiap 5 jam,
+        dan _morning_briefing().
         """
         try:
             ohlcv_1d = exchange.get_ohlcv(
@@ -299,7 +307,8 @@ class VortexBot:
                          funding_result: dict,
                          corr_result: dict,
                          score: int,
-                         effective_min: int) -> str:
+                         effective_min: int,
+                         max_score: int) -> str:
         try:
             ema_ok   = "✅" if ind.get("ema_bullish") is not None else "❌"
             stoch_k  = ind.get("stoch_k", 50)
@@ -372,8 +381,8 @@ class VortexBot:
                 f"VWAP{vwap_ok}({vwap_zone}/{vwap_sess}) "
                 f"Fund{fund_ok}({fund_rate:+.3f}%) "
                 f"Corr{corr_ok}({corr_trend}) | "
-                f"Score:{score}/24 "
-                f"(min:{effective_min}/24)"
+                f"Score:{score}/{max_score} "
+                f"(min:{effective_min}/{max_score})"
             )
 
         except Exception as e:
@@ -391,13 +400,19 @@ class VortexBot:
             # ── STEP 1: SESSION FILTERS ──────────────────────────────────────
             session_info = session_filter.get_session_info()
 
-            # should_avoid tidak lagi mencakup in_delay
-            # in_delay dihandle terpisah — bot tetap analisis pair
             if session_info.get("should_avoid"):
                 reason = session_info.get("avoid_reason", "")
                 logger.info(f"⏭️ Skip {pair}: {reason}")
                 return {}
 
+            # FIX v1.4: KILLZONE JADI SOFT-SCORE, BUKAN HARD GATE LAGI.
+            # backtest_killzone_test.py (train/test split validation)
+            # nunjukin killzone filter justru MERUGIKAN secara konsisten
+            # di train DAN test set -- non-killzone konsisten lebih baik
+            # expectancy-nya. Analisis sekarang TETAP jalan 24 jam;
+            # killzone cuma jadi 1 komponen soft-score (killzone_ok,
+            # 1 poin) di confluence.py -- sama kayak VWAP yang juga
+            # sudah diubah dari hard block jadi soft score.
             killzone = session_filter.is_killzone()
             if not killzone.get("in_killzone"):
                 if killzone.get("in_delay"):
@@ -406,13 +421,11 @@ class VortexBot:
                         f"— analisis tetap, entry tunggu delay selesai"
                     )
                 else:
-                    next_s = killzone.get("next_session", {})
-                    logger.info(
-                        f"⏭️ {pair}: Outside killzone | "
-                        f"Next: {next_s.get('name', 'N/A')} "
-                        f"in {next_s.get('minutes_away', '?')} min"
+                    logger.debug(
+                        f"ℹ️ {pair}: Di luar killzone — analisis tetap "
+                        f"lanjut (v1.4 soft-score)"
                     )
-                    return {}
+                # TIDAK ADA return {} DI SINI LAGI (v1.4)
 
             news_blocked = self._check_and_notify_news_block()
             if news_blocked:
@@ -590,6 +603,11 @@ class VortexBot:
                 return {}
 
             # ── STEP 10: CONFLUENCE SCORING ──────────────────────────────────
+            # session_info["in_killzone"] diisi sesuai kondisi ASLI saat ini
+            # (v1.4) -- supaya killzone_ok di confluence.py merefleksikan
+            # kondisi real, bukan gate yang udah pernah nge-skip duluan.
+            session_info["in_killzone"] = killzone.get("in_killzone", False)
+
             score_result = confluence_scorer.calculate(
                 direction          =direction,
                 indicators         =ind_15m,
@@ -604,10 +622,11 @@ class VortexBot:
                 correlation_result =corr_result,
             )
 
-            score     = score_result.get("score", 0)
-            is_valid  = score_result.get("is_valid", False)
-            grade     = score_result.get("grade", "F")
-            hard_fail = score_result.get("hard_fail", False)
+            score      = score_result.get("score", 0)
+            max_score  = score_result.get("max_score", confluence_scorer.max_score)
+            is_valid   = score_result.get("is_valid", False)
+            grade      = score_result.get("grade", "F")
+            hard_fail  = score_result.get("hard_fail", False)
 
             regime_boost  = risk_manager.get_regime_score_boost()
             effective_min = cfg.MIN_CONFLUENCE_SCORE + regime_boost
@@ -623,6 +642,7 @@ class VortexBot:
                 corr_result    =corr_result,
                 score          =score,
                 effective_min  =effective_min,
+                max_score      =max_score,
             )
             logger.info(f"📊 {score_log}")
 
@@ -639,8 +659,8 @@ class VortexBot:
                     )
                 else:
                     reason = (
-                        f"score {score}/24 "
-                        f"below threshold {effective_min}/24"
+                        f"score {score}/{max_score} "
+                        f"below threshold {effective_min}/{max_score}"
                     )
                 logger.info(
                     f"⏭️ {pair}: {reason} ({grade}) "
@@ -675,6 +695,7 @@ class VortexBot:
                     "session_name", "Unknown"
                 ),
                 "killzone"         : killzone.get("session", ""),
+                "in_killzone"      : killzone.get("in_killzone", False),
                 "stoch_k"          : ind_15m.get("stoch_k", 0),
                 "stoch_d"          : ind_15m.get("stoch_d", 0),
                 "stoch_zone"       : (
@@ -723,6 +744,7 @@ class VortexBot:
                 ),
                 "regime_boost"     : regime_boost,
                 "effective_min_score": effective_min,
+                "max_score"        : max_score,
                 "score_breakdown"  : score_result.get("breakdown", {}),
                 "top_reasons"      : score_result.get("reasons", [])[:8],
                 "tf_bias"          : cfg.TF_BIAS,
@@ -743,13 +765,14 @@ class VortexBot:
             logger.info(
                 f"🎯 VALID SIGNAL!\n"
                 f"   {pair} {direction} "
-                f"Score:{score}/24 (min:{effective_min}/24) ({grade}) "
+                f"Score:{score}/{max_score} (min:{effective_min}/{max_score}) ({grade}) "
                 f"RR:1:{rr2:.1f} "
                 f"SL:{tp_sl.get('sl_pct', 0):.2f}% "
                 f"BP:{bp_mode} "
                 f"VWAP:{vwap_result.get('zone','?')}/"
                 f"{vwap_result.get('session','?')} "
                 f"BTC:{corr_result.get('btc_trend','?')} "
+                f"Killzone:{'YA' if killzone.get('in_killzone') else 'tidak (soft-score)'} "
                 f"Regime:+{regime_boost} | "
                 f"{wib_str()}"
             )
@@ -782,7 +805,12 @@ class VortexBot:
                 )
                 return
 
-            # skip execute jika masih dalam delay window
+            # FIX v1.4 (dipertahankan dari v1.3b): skip execute jika masih
+            # dalam delay window (15 mnt London / 5 mnt NY). Ini BEDA
+            # dari killzone hard-gate yang dihapus di Step 1 analyze_pair()
+            # -- delay window ini proteksi terpisah (nunggu spread stabil
+            # pas awal sesi buka), belum diuji sama backtest_killzone_test.py,
+            # jadi tetap dipertahankan sampai ada bukti buat mengubahnya.
             killzone = session_filter.is_killzone()
             if not killzone.get("in_killzone") and killzone.get("in_delay"):
                 logger.info(
@@ -1174,11 +1202,6 @@ class VortexBot:
         schedule.every().sunday.at("17:01").do(self._reset_weekly_balance)
         schedule.every().day.at("17:01").do(self._check_monthly_reset)
 
-        # FIX v1.3c: regime cache expired tiap 6 jam tapi dulu cuma
-        # di-refresh sekali sehari (morning briefing) -> ±18 jam/hari
-        # threshold efektif diam-diam naik +1 gara-gara cache basi,
-        # bukan karena regime beneran berubah. Refresh tiap 5 jam
-        # supaya cache selalu fresh sebelum sempat expired (6 jam).
         schedule.every(5).hours.do(self._refresh_regime, context="scheduled")
 
         logger.info(
@@ -1347,15 +1370,17 @@ class VortexBot:
     def run(self):
         self.setup_scheduled_tasks()
 
+        max_score = confluence_scorer.max_score
         logger.info(
             f"🔄 Main loop started!\n"
             f"   Exchange : {EXCHANGE_NAME}\n"
             f"   Pairs    : {', '.join(self.pairs)}\n"
             f"   Interval : 60s\n"
             f"   Strategy : SMC+Stoch+BP+VWAP+Fund+Corr\n"
-            f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/24\n"
+            f"   Score    : min {cfg.MIN_CONFLUENCE_SCORE}/{max_score}\n"
             f"   SL       : 2.0x ATR Dynamic\n"
-            f"   Delays   : London+15m NY+5m Asia skip\n"
+            f"   Killzone : soft-score, analisis jalan 24 jam (v1.4)\n"
+            f"   Delays   : London+15m NY+5m (tetap aktif utk execute)\n"
             f"   API      : port 8080\n"
             f"   Time WIB : {wib_str()}\n"
             f"   Time UTC : {utc_str()}"
@@ -1455,26 +1480,24 @@ class VortexBot:
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════╗
-║         VΦrtex Bot v1.3c                 ║
+║         VΦrtex Bot v1.4                  ║
 ║   Institutional Grade Trading Bot        ║
 ║   SMC + Fibonacci + BP + VWAP            ║
 ║   Funding + Correlation + Regime         ║
-║   BOS Freshness | ATR 2.0x | Score /24  ║
+║   BOS Freshness | ATR 2.0x               ║
+║   Killzone: soft-score (24 jam analisis) ║
 ║   Mini App API  : port 8080              ║
 ╚══════════════════════════════════════════╝
     """)
 
     bot = VortexBot()
 
-    # Startup bot (connect exchange, detect regime, init telegram)
     if not bot.startup():
         logger.error("❌ Startup failed!")
         exit(1)
 
-    # Hubungkan bot ke API server supaya bisa akses open_trades, dll
     set_bot_ref(bot)
 
-    # Jalankan API server di background thread (tidak ganggu bot loop)
     api_thread = threading.Thread(
         target=start_api_server,
         kwargs={"bot_ref": bot, "host": "0.0.0.0", "port": 8080},
@@ -1484,5 +1507,4 @@ if __name__ == "__main__":
     api_thread.start()
     logger.info("🌐 Mini App API server started on port 8080")
 
-    # Bot main loop — blocking sampai bot.running = False
     bot.run()

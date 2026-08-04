@@ -1,6 +1,25 @@
 # ============================================
 # VORTEX BOT - NEWS & SESSION FILTER
-# FIX v1.3b:
+# FIX v1.4:
+#   - BUG FIX KRITIS: parsing waktu news event dari API
+#     (ff_calendar_thisweek.json) mengembalikan waktu dalam
+#     LOCAL EASTERN TIME (US) lengkap dengan offset (misal
+#     "-04:00"). Kode sebelumnya:
+#         datetime.strptime(...).replace(tzinfo=None)
+#     itu cuma MEMBUANG info timezone, BUKAN mengonversi ke
+#     UTC dulu. Akibatnya jam event yang sebenarnya (misal
+#     15:30 Eastern = 19:30 UTC) diperlakukan seolah sudah
+#     15:30 UTC -- geser 4-5 jam (tergantung EDT/EST) dari
+#     waktu asli. Karena now_utc yang dipakai buat perbandingan
+#     itu UTC asli, jendela block jadi salah total: event yang
+#     sudah lewat bisa masih dianggap "aktif blocking", atau
+#     event yang belum waktunya sudah ke-block duluan.
+#     FIX: .astimezone(UTC) dulu SEBELUM .replace(tzinfo=None),
+#     supaya waktu yang dibandingkan benar-benar UTC asli.
+#     Diperbaiki di is_safe_to_trade() DAN get_upcoming_news()
+#     (dua-duanya punya bug yang sama).
+# ============================================
+# FIX v1.3b (dipertahankan):
 #   - get_session_info() tidak lagi treat in_delay
 #     sebagai should_avoid. BUG SEBELUMNYA: delay
 #     menyebabkan bot skip Step 1 analyze_pair()
@@ -17,6 +36,33 @@ from logger import logger
 
 WIB = timezone(timedelta(hours=7))
 UTC = timezone.utc
+
+
+def _parse_news_time_to_utc(time_str: str):
+    """
+    FIX v1.4: parse waktu event dari API dan KONVERSI ke UTC
+    dengan benar. Sebelumnya cuma strip tzinfo tanpa konversi,
+    menyebabkan geser 4-5 jam kalau API return waktu Eastern (US)
+    dengan offset (format umum di ff_calendar_thisweek.json).
+
+    Return naive datetime dalam UTC, atau None kalau gagal parse.
+    """
+    if not time_str:
+        return None
+    try:
+        # Format dengan offset timezone (mis. "...T15:30:00-04:00")
+        # -> WAJIB astimezone(UTC) dulu sebelum strip tzinfo,
+        # supaya nilai jam yang dipakai benar-benar UTC.
+        dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S%z")
+        return dt.astimezone(UTC).replace(tzinfo=None)
+    except Exception:
+        pass
+    try:
+        # Fallback: format TANPA offset -- diasumsikan sudah UTC,
+        # tidak perlu konversi (tidak ada info tz buat dikonversi).
+        return datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        return None
 
 
 class NewsFilter:
@@ -85,21 +131,23 @@ class NewsFilter:
                 if impact != "high":
                     continue
 
-                time_str = news.get("date", "")
-                if not time_str:
+                # FIX v1.4: persempit ke event USD doang. Crypto (BTC/ETH/dst)
+                # paling sensitif ke makro USD (FOMC, CPI, NFP) karena semua
+                # pair didenominasi USDT dan USD driver likuiditas global
+                # terbesar. Event high-impact dari negara lain (EUR/GBP/JPY/
+                # AUD dst) hampir gak relevan buat crypto tapi sebelumnya
+                # tetap nge-block SEMUA pair -- ini yang bikin block kerasa
+                # kelewat sering/luas.
+                country = str(news.get("country", "")).upper()
+                if country != "USD":
                     continue
 
-                try:
-                    news_time = datetime.strptime(
-                        time_str, "%Y-%m-%dT%H:%M:%S%z"
-                    ).replace(tzinfo=None)
-                except Exception:
-                    try:
-                        news_time = datetime.strptime(
-                            time_str, "%Y-%m-%dT%H:%M:%S"
-                        )
-                    except Exception:
-                        continue
+                time_str = news.get("date", "")
+                # FIX v1.4: pakai helper yang konversi ke UTC dengan
+                # benar (dulu ada bug -- lihat _parse_news_time_to_utc)
+                news_time = _parse_news_time_to_utc(time_str)
+                if news_time is None:
+                    continue
 
                 window_start = news_time - timedelta(minutes=minutes_before)
                 window_end   = news_time + timedelta(minutes=minutes_after)
@@ -187,21 +235,16 @@ class NewsFilter:
                 if impact != "high":
                     continue
 
-                time_str = news.get("date", "")
-                if not time_str:
+                # FIX v1.4: konsisten sama is_safe_to_trade() -- cuma USD
+                country = str(news.get("country", "")).upper()
+                if country != "USD":
                     continue
 
-                try:
-                    news_time = datetime.strptime(
-                        time_str, "%Y-%m-%dT%H:%M:%S%z"
-                    ).replace(tzinfo=None)
-                except Exception:
-                    try:
-                        news_time = datetime.strptime(
-                            time_str, "%Y-%m-%dT%H:%M:%S"
-                        )
-                    except Exception:
-                        continue
+                time_str = news.get("date", "")
+                # FIX v1.4: sama, pakai helper konversi UTC yang benar
+                news_time = _parse_news_time_to_utc(time_str)
+                if news_time is None:
+                    continue
 
                 if now_utc <= news_time <= now_utc + timedelta(hours=hours_ahead):
                     mins_away = int(
